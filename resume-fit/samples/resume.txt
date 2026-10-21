@@ -1,0 +1,24 @@
+ALEX MORGAN
+Full Stack Developer
+alex@example.com | Bengaluru, India | github.com/example
+
+SUMMARY
+Full stack developer building accessible web applications with JavaScript, React and Node.js.
+
+EXPERIENCE
+Software Developer | Example Studio | 2023–Present
+- Updated CSS styles and HTML templates for the company website.
+- Built React interfaces and Node.js REST APIs using Express and PostgreSQL.
+- Wrote unit tests and automated testing in CI/CD workflows.
+- Collaborated with designers to improve accessibility.
+
+PROJECTS
+Task Planner | Personal project
+- Created a responsive dashboard using React and JavaScript.
+- Designed PostgreSQL tables and REST endpoints using Node.js.
+
+SKILLS
+JavaScript, React, Node.js, Express, PostgreSQL, Git, HTML, CSS, Testing
+
+EDUCATION
+B.Tech in Computer Science | Example University | 2023

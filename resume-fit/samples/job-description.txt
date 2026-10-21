@@ -1,0 +1,2 @@
+Full Stack Developer — Example Company
+We are looking for a developer with React, Node.js, Express, PostgreSQL and REST API experience. You will build accessible interfaces, write unit tests and maintain CI/CD workflows. Familiarity with Docker and AWS is preferred. Strong communication skills are helpful.
