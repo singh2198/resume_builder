@@ -119,7 +119,7 @@ def main():
             pdf=export_pdf(raw,doc,info,request.get('orders',[]))
             if request.get('action')=='preview':
                 with fitz.open(stream=pdf,filetype='pdf') as rendered:
-                    pages=[{'image':base64.b64encode(p.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False).tobytes('png')).decode()} for p in rendered]
+                    pages=[{'image':base64.b64encode(p.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False).tobytes('png')).decode(), 'originalImage':base64.b64encode(doc[i].get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False).tobytes('png')).decode()} for i,p in enumerate(rendered)]
                 print(json.dumps({'pages':pages}))
             else:print(json.dumps({'pdf':base64.b64encode(pdf).decode()}))
         else:print(json.dumps(info))

@@ -8,7 +8,9 @@
     "build": "vite build",
     "start": "node server/index.js",
     "test": "node --test server/*.test.js",
-    "setup:pdf": "node server/pdf/setup.js"
+    "setup:pdf": "node server/pdf/setup.js",
+    "format": "prettier --write client server vite.config.js package.json",
+    "format:check": "prettier --check client server vite.config.js package.json"
   },
   "engines": {
     "node": ">=22.13"
@@ -27,6 +29,7 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "prettier": "3.9.10",
     "vite": "^6.1.0"
   }
 }
