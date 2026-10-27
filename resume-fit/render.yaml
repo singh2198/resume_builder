@@ -1,0 +1,41 @@
+# Blueprint path in this repository: resume-fit/render.yaml
+# Review the paid service + disk cost before creating resources.
+services:
+  - type: web
+    name: resume-fit
+    runtime: docker
+    plan: starter
+    numInstances: 1
+    rootDir: resume-fit
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    disk:
+      name: resume-fit-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /app/data
+      - key: TRUST_PROXY_HOPS
+        value: '1'
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: MAX_AI_REQUESTS_PER_DAY
+        value: '100'
+      - key: APP_ORIGIN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false

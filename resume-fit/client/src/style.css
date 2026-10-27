@@ -872,3 +872,18 @@ pre {
     white-space: normal;
   }
 }
+
+.editor-card.enhancement-card textarea {
+  min-height: 140px;
+  font-family: inherit;
+  margin-bottom: 12px;
+}
+.enhancement-card .checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px 0;
+}
+.enhancement-card [role='alert'] {
+  color: #a13c32;
+}

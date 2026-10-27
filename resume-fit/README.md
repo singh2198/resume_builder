@@ -12,7 +12,7 @@ npm run setup:pdf
 npm run dev
 ```
 
-Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. Tailoring and previews need no API key or external AI account. Downloads require Razorpay configuration below; SQLite needs no separate installation. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
+Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. Basic prioritization and previews need no API key or external AI account. Optional AI improvements require an OpenAI API key. Downloads require Razorpay configuration below; SQLite needs no separate installation. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
 
 For the built app:
 
@@ -64,9 +64,17 @@ The helper uses PyMuPDF (AGPL/commercial dual licensing). Review its license bef
 
 ## What “tailor” means here
 
-This version uses deterministic extraction and prioritization, **not generative AI**. It finds a documented, finite set of job keywords with aliases and reorders contiguous bullet groups so relevant experience comes first. Every original line remains in the resume; bullets never move between roles or projects. You can edit the generated text before downloading. It deliberately does not invent skills, credentials, dates, metrics, experience or a summary.
+Basic tailoring preserves every original point and ranks bullets within the same role/project. **Generate AI improvements** adds a separate review step: stronger wording, new bullet suggestions grounded in additional experience, and advice for missing JD skills.
 
-This is appropriate for a reliable first version with no API costs. It is not semantic rewriting or a production hiring system. It cannot guarantee interview selection or imitate proprietary ATS algorithms.
+### Enable AI improvements
+
+1. Add `OPENAI_API_KEY=your_key` to the server `.env`. Keep existing Razorpay settings. Never use a `VITE_` prefix or paste a key into the resume inputs.
+2. Optionally set `OPENAI_MODEL` to a Responses API model supporting Structured Outputs (default: `gpt-4.1-mini`). Restart the server.
+3. Tailor your resume as usual. Under **Improve points for this job**, describe additional real work with its role/project if you want new points, then click **Generate AI improvements**. This sends the current draft, JD and additional facts to OpenAI and may incur API charges.
+4. Review each before/after suggestion, its source evidence and factual accuracy. Confirm and apply individual changes. Unsupported skills appear as questions or learning tasks, not inserted claims. Regeneration uses the current edited draft.
+5. Review the editor and exported PDF. Applied improvements use the existing edited-original PDF export for uploaded PDFs, including its section styling and overflow safeguards. The free original-layout preview still represents the unedited generated draft. Longer text may require shortening to fit.
+
+The server uses the [OpenAI Responses API with Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), disables response storage (`store: false`), validates source anchors and exact evidence quotes, and returns sanitized provider errors. Evidence checks do not prove semantic truth: you must review generated claims. No real key is included. Without a configured key, AI enhancement reports a setup message while basic tailoring remains available. No external AI calls occur during basic tailoring, PDF previews, exports or automated tests.
 
 ### Matching limitations
 
@@ -94,7 +102,7 @@ This is appropriate for a reliable first version with no API costs. It is not se
 
 The server binds to `127.0.0.1`. This is a **single-user local app**, without authentication. Do not expose it to a shared network or public hosting as-is. All local users with access to the app/database can read saved drafts.
 
-Raw uploads stay in memory. Preparing a paid download stores the generated file and its payment record in SQLite, including preparations that have not yet been paid. Other unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is not sent to an AI provider. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
+Raw uploads stay in memory. Preparing a paid download stores the generated file and its payment record in SQLite, including preparations that have not yet been paid. Other unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is sent to OpenAI only when you request AI improvements; this includes the current draft, job description and additional facts. AI suggestions remain in browser state until applied; applied edits can be saved or exported through the existing flow. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
 
 History stores the original generated draft. Manual editor changes are included in purchased exports and can be saved with **Save edited draft locally**; editing alone does not update the displayed score. Inputs changing dismiss the old result to avoid displaying stale analysis.
 
@@ -114,6 +122,7 @@ vite.config.js          Frontend build and development proxy
 
 ## API
 
+- `POST /api/enhance` — JSON `resume`, `jd`, optional `facts` (10,000 chars); returns reviewed improvement candidates and skill gaps; requires server OpenAI key, limited to 5 requests/minute per IP
 - `GET /api/health` — server readiness
 - `POST /api/extract` — multipart form with `file`; returns `{ text }`
 - `POST /api/tailor-pdf` — multipart `file`, `jd`, optional `label`, `save`; returns draft and original-layout metadata
@@ -145,3 +154,9 @@ Tests cover alias handling, term boundaries, stable ranking, keeping achievement
 A generative provider can be added server-side, with credentials in environment variables, explicit consent before transmitting personal data, a structured output schema, sentence-level source references and human review. Do not present a rewritten claim as verified merely because an AI generated it. The current extractive approach avoids that risk entirely.
 
 PDF engine regression tests: `.venv/bin/python server/pdf/layout_test.py` (Windows: `.venv\Scripts\python.exe server/pdf/layout_test.py`). Tests cover unchanged-byte identity, reordered text without duplication, fonts, dimensions, URI links, and invalid permutations.
+
+## Public hosting on Render
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker/Render setup, persistent SQLite storage, server environment variables, Razorpay webhooks and hosted verification. `render.yaml` is inside `resume-fit/` relative to the repository root. The public deployment uses signed browser workspaces to isolate saved history, and a persistent daily AI request cap. It needs `SESSION_SECRET` and a paid service with persistent disk. Public browser workspaces last up to 30 days; they are not user accounts or cross-device recovery. Local development keeps its existing personal history. Existing local history is not shared with public visitors.
+
+Local startup binds to `127.0.0.1` by default; hosting sets `HOST=0.0.0.0`. The earlier single-user local limitations above describe development mode. Production mode requires a stable session secret and scopes history reads, writes and deletion to the current signed browser workspace.

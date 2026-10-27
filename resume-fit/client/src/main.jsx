@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
+import Enhancements from './Enhancements.jsx';
 import { paidDownload, recoverDownload, savedPurchase, paymentConfig } from './payments.js';
 const sampleResume = `ALEX MORGAN
 Full Stack Developer
@@ -394,7 +395,7 @@ function App() {
           <div className="shield">◇</div>
           <strong>Your experience. Better aligned.</strong>
           <p>Relevant details first. Original facts preserved. You stay in control.</p>
-          <span className="local-dot">●</span> Runs locally on your computer
+          <span className="local-dot">●</span> Your resume workspace
         </div>
         <div className="aside-bottom">
           REACT + NODE.JS <span>v1.0</span>
@@ -476,12 +477,13 @@ function App() {
             <section className="card history">
               <h2>Saved applications</h2>
               <p>
-                Saved locally in SQLite. Deleting an entry permanently removes its stored draft.
+                Saved on this server. On the public app, history belongs to this browser for up to
+                30 days. Clearing cookies or changing devices loses access. Deleting an entry
+                permanently removes its stored draft.
               </p>
               {history.length === 0 ? (
                 <div className="empty">
-                  No saved applications yet. Turn on “Save this result locally” when tailoring a
-                  resume.
+                  No saved applications yet. Turn on “Save this result” when tailoring a resume.
                 </div>
               ) : (
                 history.map((item) => (
@@ -627,7 +629,7 @@ function App() {
                         checked={save}
                         onChange={(e) => setSave(e.target.checked)}
                       />{' '}
-                      Save this result locally
+                      Save this result
                     </label>
                   </div>
                   <div className="actions">
@@ -657,7 +659,8 @@ function App() {
                 </div>
                 <p className="privacy-note">
                   ◇ Prepared downloads and payment records are stored on this server. Resume content
-                  is not sent to Razorpay. No external AI service is used.
+                  is not sent to Razorpay. Optional AI improvements send your draft and job
+                  description to OpenAI only when you click Generate AI improvements.
                 </p>
               </form>
               {result && (
@@ -666,8 +669,8 @@ function App() {
                     <div className="eyebrow">YOUR APPLICATION, REFINED</div>
                     <h2>Review before you send.</h2>
                     <p>
-                      Review the reordered draft, add experience missing from your resume, and edit
-                      before exporting.
+                      Review the prioritized draft, generate stronger wording and new points from
+                      real experience, then edit before exporting.
                     </p>
                   </div>
                   <div className="analysis-grid">
@@ -716,6 +719,20 @@ function App() {
                     </div>
                   </div>
                   <ResumeChanges result={result} edited={edited} />
+                  <Enhancements
+                    key={result.updatedResume}
+                    draft={edited}
+                    jd={jd}
+                    disabled={!!busy}
+                    onApply={(text) => {
+                      setEdited(text);
+                      setEditing(true);
+                      setPreview([]);
+                      setNotice(
+                        'Improvement applied. Review the editor and final PDF layout before sending.',
+                      );
+                    }}
+                  />
                   <GapSuggestions
                     suggestions={result.suggestions || []}
                     disabled={!!busy}
@@ -886,7 +903,7 @@ function App() {
                           })
                         }
                       >
-                        Save edited draft locally
+                        Save edited draft
                       </button>
                     </div>
                     {editing && (
