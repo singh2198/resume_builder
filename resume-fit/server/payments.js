@@ -17,6 +17,11 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
   )`);
   const router = express.Router();
   const ready = () => {
+    if (config.demoMode && !config.keyId?.startsWith('rzp_test_'))
+      throw httpError(
+        503,
+        'Real payments are disabled on this free demo. Only Razorpay Test Mode is supported.',
+      );
     if (!config.keyId || !config.keySecret)
       throw httpError(503, 'Payments are not configured yet. Add Razorpay keys on the server.');
   };
@@ -79,7 +84,12 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
   });
   router.get('/config', (_, res) =>
     res.json({
-      configured: !!(config.keyId && config.keySecret),
+      configured: !!(
+        config.keyId &&
+        config.keySecret &&
+        (!config.demoMode || config.keyId.startsWith('rzp_test_'))
+      ),
+      demoMode: !!config.demoMode,
       amount: PRICE,
       currency: 'INR',
       testMode: config.keyId?.startsWith('rzp_test_') || false,

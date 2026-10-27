@@ -445,6 +445,16 @@ function App() {
               {busy}…
             </div>
           )}
+          {payment?.demoMode && (
+            <section className="notice" aria-label="Free demo limitations">
+              <strong>Free public demo</strong>
+              <p>
+                Saved history and test purchases are temporary and may disappear when the server
+                sleeps or restarts. Real payments are disabled. AI generation is off by default;
+                editing, keyword matching and PDF previews are available.
+              </p>
+            </section>
+          )}
           <section className="notice" aria-label="Download payment">
             <strong>Resume downloads · ₹1 per file</strong>
             <p>
