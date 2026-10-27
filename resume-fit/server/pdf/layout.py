@@ -2,11 +2,12 @@
 JSON stdin/stdout protocol; documents never go to disk. No text is regenerated.
 """
 import base64, json, re, sys
+from difflib import SequenceMatcher
 import pymupdf as fitz
 
 
 def inspect_pdf(doc):
-    groups, texts = [], []
+    groups, texts, segments = [], [], []
     if len(doc) > 10:
         raise ValueError('Original-layout mode supports resumes up to 10 pages.')
     for page_number, page in enumerate(doc):
@@ -24,7 +25,7 @@ def inspect_pdf(doc):
                 if key in seen:  # shadowed title is drawn twice
                     continue
                 seen.add(key)
-                rows.append({'text':text, 'rect':list(rect), 'size':max(s['size'] for s in line['spans'])})
+                rows.append({'text':text, 'rect':list(rect), 'style':max(line['spans'], key=lambda s:len(s['text'])), 'size':max(s['size'] for s in line['spans'])})
         rows.sort(key=lambda r:(round(r['rect'][1], 0), r['rect'][0]))
         # Combine fragments on the same visual row (e.g. education dates).
         merged = []
@@ -50,6 +51,10 @@ def inspect_pdf(doc):
                 prev['text']+=' '+row['text'];prev['rect'][3]=row['rect'][3]
             else:
                 units.append(dict(row))
+        for unit in units:
+            unit['page'] = page_number
+            unit['text'] = ('- '+re.sub(r'^[•●▪\-*]\s+', '', unit['text'])) if unit['bullet'] else unit['text']
+            segments.append(unit)
         i=0
         while i<len(units):
             u=units[i]
@@ -69,7 +74,7 @@ def inspect_pdf(doc):
                 if all(cuts[k]<bullets[k]['rect'][1] and cuts[k+1]>bullets[k]['rect'][3] for k in range(len(bullets))):
                     groups.append({'page':page_number,'top':top,'bottom':bottom,'bullets':[{'text':b['text'],'top':cuts[k],'bottom':cuts[k+1]} for k,b in enumerate(bullets)]})
             i=end
-    return {'text':'\n'.join(texts).strip(),'groups':groups,'pageCount':len(doc)}
+    return {'text':'\n'.join(texts).strip(),'groups':groups,'pageCount':len(doc),'segments':segments}
 
 
 def export_pdf(raw, doc, info, orders):
@@ -110,11 +115,175 @@ def export_pdf(raw, doc, info, orders):
     output=result.tobytes(garbage=4,deflate=True);result.close();return output
 
 
+def edit_pdf(raw, text):
+    """Reflow changed text bands; retain unchanged PDF artwork and links."""
+    with fitz.open(stream=raw, filetype='pdf') as source:
+        info = inspect_pdf(source)
+        units = info['segments']
+        before = [u['text'] for u in units]
+        after = [line.strip() for line in text.replace('\r', '').split('\n') if line.strip()]
+        if before == after: return raw
+        changes = {}
+        for tag, a, b, c, d in SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+            if tag == 'equal': continue
+            anchor = min(a, len(units)-1)
+            page_number = units[anchor]['page']
+            if b > a and any(u['page'] != page_number for u in units[a:b]):
+                raise ValueError('Edit one page at a time to preserve the original design.')
+            page_units = [u for u in units if u['page'] == page_number]
+            first = units[anchor]
+            if b > a:
+                last = units[b-1]
+                top = first['rect'][1]-1
+                bottom = last['rect'][3]+1
+            else:
+                top = bottom = first['rect'][1]-2
+            if a == len(units):
+                first = units[-1]; top = bottom = first['rect'][3]+3
+            if b > a and any(u.get('split') for u in units[a:b]):
+                raise ValueError('This edit changes a multi-column row. Edit a single-column section to preserve its alignment.')
+            # Inserting a bullet at a section boundary inherits the previous bullet style.
+            style_unit = first
+            if c < d and a > 0 and units[a-1]['page'] == page_number and (units[a-1]['bullet'] or (a == b and not first['bullet'])):
+                style_unit = units[a-1]
+                if a == b: top = bottom = style_unit['rect'][3]+2
+            changes.setdefault(page_number, []).append((top, bottom, after[c:d], style_unit))
+        result = fitz.open()
+        heights = {}
+        for number, page in enumerate(source):
+            if number not in changes:
+                result.insert_pdf(source, from_page=number, to_page=number); continue
+            target = result.new_page(width=page.rect.width, height=page.rect.height*4)
+            bands = []; cursor = destination = 0
+            for top, bottom, lines, unit in sorted(changes[number], key=lambda x:x[0]):
+                if top < cursor: raise ValueError('These edits overlap. Please edit smaller sections.')
+                if top > cursor:
+                    bands.append((cursor, top, destination)); destination += top-cursor
+                if lines:
+                    style = unit['style']; size = style['size']
+                    fontname = style['font']; font = None
+                    resource_name = 'edited' + str(len(target.get_fonts()))
+                    for item in page.get_fonts(full=True):
+                        if re.sub(r'^[A-Z]{6}\+', '', item[3]).replace(' ', '') == fontname.replace(' ', ''):
+                            data = source.extract_font(item[0])[3]
+                            if data:
+                                font = fitz.Font(fontbuffer=data); target.insert_font(fontname=resource_name, fontbuffer=data)
+                                break
+                    if font is None:
+                        flags = style.get('flags', 0)
+                        base = ('Times' if flags & 4 else 'Helvetica')
+                        if base == 'Times': base = 'Times-BoldItalic' if flags & 16 and flags & 2 else 'Times-Bold' if flags & 16 else 'Times-Italic' if flags & 2 else 'Times-Roman'
+                        else: base = 'Helvetica-BoldOblique' if flags & 16 and flags & 2 else 'Helvetica-Bold' if flags & 16 else 'Helvetica-Oblique' if flags & 2 else 'Helvetica'
+                        font = fitz.Font(base); resource_name = base; target.insert_font(fontname=resource_name)
+                    x = unit['rect'][0]
+                    right = max(u['rect'][2] for u in info['segments'] if u['page']==number)
+                    color = fitz.sRGB_to_pdf(style['color'])
+                    baseline_offset = style['origin'][1] - style['bbox'][1]
+                    line_height = size*1.25
+                    baseline = destination + baseline_offset
+                    for line in lines:
+                        # Copy matching source artwork instead of repainting plain text.
+                        # This retains mixed font weights, bullet geometry and colors.
+                        canonical = lambda value: re.sub(r'\s+', '', re.sub(r'^[-•●▪*]\s*', '', value))
+                        copied = next((u for u in units if not u.get('split') and canonical(u['text']) == canonical(line)), None)
+                        if copied:
+                            source_page = source[copied['page']]
+                            bounds = fitz.Rect(copied['rect'])
+                            clip = fitz.Rect(0, bounds.y0-.25, source_page.rect.width, bounds.y1+.25)
+                            y = baseline-baseline_offset
+                            piece = fitz.open()
+                            piece.insert_pdf(source, from_page=copied['page'], to_page=copied['page'], links=False)
+                            piece[0].clip_to_rect(clip)
+                            target.show_pdf_page(fitz.Rect(0,y,clip.width,y+clip.height),piece,0,clip=clip)
+                            piece.close()
+                            for link in source_page.get_links():
+                                if link['kind'] == fitz.LINK_URI and clip.contains(fitz.Rect(link['from'])):
+                                    rect=fitz.Rect(link['from']);rect.y0+=y-clip.y0;rect.y1+=y-clip.y0
+                                    target.insert_link({'kind':fitz.LINK_URI,'from':rect,'uri':link['uri']})
+                            baseline += clip.height+size*.25
+                            continue
+                        explicit_bullet = bool(re.match(r'^[-•●▪*]\s+', line))
+                        bullet = explicit_bullet or unit['bullet']
+                        value = re.sub(r'^[-•●▪*]\s+', '', line) if explicit_bullet else line
+                        words = value.split(); wrapped = []; current = ''
+                        for word in words:
+                            candidate = (current+' '+word).strip()
+                            if font.text_length(word, fontsize=size) > right-x:
+                                raise ValueError('A word is too wide for the original layout. Shorten it before exporting.')
+                            if current and font.text_length(candidate, fontsize=size) > right-x:
+                                wrapped.append(current); current = word
+                            else: current = candidate
+                        if current: wrapped.append(current)
+                        if bullet:
+                            # Reuse the neighboring point's actual marker, including its
+                            # geometry, fill and alignment rather than drawing a new dot.
+                            marker = fitz.Rect(max(0,x-16),style['bbox'][1]-.25,x-.5,style['bbox'][3]+.25)
+                            if unit['bullet'] and marker.width > 0:
+                                piece=fitz.open();piece.insert_pdf(source,from_page=number,to_page=number,links=False)
+                                piece[0].clip_to_rect(marker)
+                                shift=baseline-style['origin'][1]
+                                target.show_pdf_page(fitz.Rect(marker.x0,marker.y0+shift,marker.x1,marker.y1+shift),piece,0,clip=marker)
+                                piece.close()
+                            else:
+                                target.draw_circle((x-7,baseline-size*.3),size*.09,color=None,fill=color)
+
+                        for row in wrapped:
+                            target.insert_text((x,baseline),row,fontname=resource_name,fontsize=size,color=color)
+                            baseline += size*1.25
+                    destination = max(destination, baseline-size*1.25-size*font.descender+2)
+                cursor = bottom
+            # Leave the original bottom margin available for added text.
+            content_bottom = max(u['rect'][3] for u in info['segments'] if u['page']==number)+3
+            end = max(cursor, content_bottom)
+            if end > cursor: bands.append((cursor,end,destination)); destination += end-cursor
+            required_height = max(page.rect.height, destination+12)
+            if page.rect.height / required_height < .85:
+                raise ValueError('These edits exceed the available page space. Shorten the text to keep the original design readable.')
+            heights[number] = required_height
+            for top,bottom,dest in bands:
+                clip = fitz.Rect(0,top,page.rect.width,bottom)
+                piece=fitz.open();piece.insert_pdf(source,from_page=number,to_page=number,links=False)
+                piece[0].clip_to_rect(clip)
+                target.show_pdf_page(fitz.Rect(0,dest,page.rect.width,dest+bottom-top),piece,0,clip=clip)
+                piece.close()
+            for link in page.get_links():
+                if link['kind'] != fitz.LINK_URI: continue
+                rect=fitz.Rect(link['from']);center=(rect.y0+rect.y1)/2
+                band=next(((top,bottom,dest) for top,bottom,dest in bands if top<=center<bottom),None)
+                if band:
+                    shift=band[2]-band[0];rect.y0+=shift;rect.y1+=shift
+                    target.insert_link({'kind':fitz.LINK_URI,'from':rect,'uri':link['uri']})
+        intermediate = result.tobytes()
+        result.close()
+        result = fitz.open(stream=intermediate,filetype='pdf')
+        normalized = fitz.open()
+        for number, rendered in enumerate(result):
+            original = source[number]
+            if number not in heights:
+                normalized.insert_pdf(result,from_page=number,to_page=number)
+            else:
+                final = normalized.new_page(width=original.rect.width,height=original.rect.height)
+                content_rect = fitz.Rect(0,0,original.rect.width,heights[number])
+                final.show_pdf_page(final.rect,result,number,clip=content_rect)
+                scale = min(final.rect.width/content_rect.width,final.rect.height/content_rect.height)
+                offset_x = (final.rect.width-content_rect.width*scale)/2
+                offset_y = (final.rect.height-content_rect.height*scale)/2
+                for link in rendered.get_links():
+                    if link['kind'] == fitz.LINK_URI:
+                        rect=fitz.Rect(link['from'])*fitz.Matrix(scale,scale)
+                        rect += (offset_x,offset_y,offset_x,offset_y)
+                        final.insert_link({'kind':fitz.LINK_URI,'from':rect,'uri':link['uri']})
+        normalized.set_metadata(source.metadata)
+        output=normalized.tobytes(garbage=4,deflate=True);normalized.close();result.close();return output
+
+
 def main():
     request=json.load(sys.stdin);raw=base64.b64decode(request['pdf'],validate=True)
     with fitz.open(stream=raw,filetype='pdf') as doc:
         if doc.needs_pass:raise ValueError('Password-protected PDFs are not supported.')
         info=inspect_pdf(doc)
+        if request.get('action') == 'edit':
+            print(json.dumps({'pdf':base64.b64encode(edit_pdf(raw, request['text'])).decode()}));return
         if request.get('action') in ('export','preview'):
             pdf=export_pdf(raw,doc,info,request.get('orders',[]))
             if request.get('action')=='preview':

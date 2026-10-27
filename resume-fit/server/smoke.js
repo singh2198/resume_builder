@@ -20,19 +20,13 @@ try {
   assert.ok(result.missing.includes('Docker'));
   assert.deepEqual(result.updatedResume.split('\n').sort(), resume.trim().split('\n').sort());
   assert.equal((await fetch(base + '/api/history/' + result.id)).status, 200);
-  for (const format of ['pdf', 'docx', 'txt']) {
-    const exported = await post('/api/export', { text: result.updatedResume, format });
-    assert.equal(exported.status, 200);
-    const buffer = await exported.arrayBuffer();
-    assert.ok(buffer.byteLength > 100);
-    const form = new FormData();
-    form.append('file', new Blob([buffer]), 'resume.' + format);
-    const imported = await fetch(base + '/api/extract', { method: 'POST', body: form });
-    assert.equal(imported.status, 200, await imported.clone().text());
-    const { text } = await imported.json();
-    assert.ok(text.includes('ALEX MORGAN'));
-    assert.ok(text.includes('PostgreSQL'));
+  for (const route of ['/api/export', '/api/export-original', '/api/export-edited-original']) {
+    const exported = await post(route, { text: result.updatedResume, format: 'pdf' });
+    assert.equal(exported.status, 402);
   }
+  const config = await (await fetch(base + '/api/payments/config')).json();
+  assert.equal(config.amount, 100);
+  assert.equal(config.currency, 'INR');
   assert.equal((await post('/api/tailor', { resume: 'short', jd })).status, 400);
   const forbidden = await fetch(base + '/api/tailor', {
     method: 'POST',
@@ -41,7 +35,7 @@ try {
   });
   assert.equal(forbidden.status, 403);
   console.log(
-    'PASS: frontend, health, tailoring, history, PDF/DOCX/TXT export-import round trips, validation, origin checks.',
+    'PASS: frontend, health, tailoring, history, unpaid export protection, fixed payment price, validation, origin checks.',
   );
 } finally {
   await fetch(base + '/api/history/' + result.id, { method: 'DELETE' });

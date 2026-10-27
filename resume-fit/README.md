@@ -12,7 +12,7 @@ npm run setup:pdf
 npm run dev
 ```
 
-Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. No API key, external AI account or database setup is needed. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
+Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. Tailoring and previews need no API key or external AI account. Downloads require Razorpay configuration below; SQLite needs no separate installation. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
 
 For the built app:
 
@@ -22,6 +22,27 @@ npm start
 ```
 
 Open http://127.0.0.1:3001. Development uses Vite's proxy to reach the Express backend on port 3001. `npm start` serves the built frontend and API together. SQLite is built into Node; an experimental-feature warning may appear on Node 22.
+
+## ₹1 Razorpay download payments
+
+Every PDF, DOCX or TXT export costs **₹1 (100 paise)**. The server fixes the price, prepares the exact file before checkout, and releases it only after verifying a captured payment. The old export endpoints return HTTP 402. Editing, saved drafts and image previews remain free. The final editor no longer exposes a downloadable PDF before payment.
+
+1. Copy `.env.example` to `.env` in the project root.
+2. In Razorpay **Test Mode → Account & Settings → API Keys**, generate a Key ID and Key Secret. Put them in `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`. These are server-only; never use a `VITE_` prefix for secrets.
+3. Enable automatic capture in Razorpay payment capture settings. An authorized but uncaptured payment does not unlock a download.
+4. Restart `npm run dev`, generate a resume, then click **Pay ₹1 & download**. Test payments are simulated; the UI identifies Test Mode.
+5. For a publicly reachable HTTPS deployment, set `APP_ORIGIN` to the exact frontend origin (no trailing slash). Configure a Razorpay webhook at `https://your-domain/api/payments/webhook`, subscribe to `payment.captured` and `order.paid`, and use the same random secret as `RAZORPAY_WEBHOOK_SECRET`. Local development can recover status by polling without a webhook; Razorpay cannot reach localhost directly.
+6. After account activation and successful test payments, configure live keys, live auto-capture and a live webhook, then restart the server to collect real ₹1 payments.
+
+**Recovery:** Payment orders and their immutable files are stored in SQLite. **Recover last download** checks Razorpay before reopening checkout. If a payment was captured or the download failed, the same file can be downloaded again without another charge. Keep the same browser tab/session for recovery; its random access token is held in session storage. There is no user-account recovery system. A different export requires a new payment. Payment details and resume content are never placed in a public download URL, and only order metadata is sent to Razorpay.
+
+**Storage:** Prepared files, including unpaid preparations, and payment records persist under `data/` (or `DATA_DIR`). Use a persistent disk and back up this directory for hosting. File retention/cleanup must preserve paid downloads you promise to support. Payment records are separate from optional saved draft history; deleting a draft does not delete a purchased file.
+
+**Verification:** `npm test` includes payment tests with a simulated Razorpay API: fixed price, invalid signatures, incorrect amount/order/currency, capture status, access tokens, duplicate webhooks, recovery, provider errors, and paid PDF/DOCX/TXT downloads. These tests do not contact Razorpay or charge money. Run a real Razorpay Test Mode checkout with your own keys before going live.
+
+Official setup: https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/
+
+For an Indian test-card payment, use Razorpay’s current test Visa `4100 2800 0000 1007`, a future expiry, any three-digit CVV and a simulated OTP of 4–10 digits. Use dummy customer details and do not save the card. See https://razorpay.com/docs/payments/payments/test-card-details/.
 
 ## Preserve your uploaded PDF format
 
@@ -35,7 +56,7 @@ PDF text is read in visual page order, and graphical bullet dots are recognized.
 
 **Limits:** conservative detection is designed for ordinary single-column resumes. Unsupported groups remain unchanged; complex columns, overlapping elements, unusual bullets or cross-page paragraphs need manual review. Rotated, password-protected or more-than-10-page PDFs are rejected. Only URI links are copied on reconstructed pages; PDF form widgets, accessibility tags, signatures and other interactive annotations are not guaranteed to survive reconstruction. It is a resume formatting workflow, not a general PDF editor.
 
-Editing the imported source text switches to rebuilt exports. Editing the generated draft disables original-layout export until **Restore generated draft** is selected. The server also enforces this guard. The original PDF is held in browser memory for the current session and is not included in saved history. Reopened history needs the original PDF and JD uploaded again for a layout-preserving export.
+Editing the imported source text switches to rebuilt exports. Editing the generated draft uses the edited-original PDF engine for paid downloads. The free original-layout image preview applies to the generated draft; use **Restore generated draft** to return to it. The original PDF is held in browser memory for the current session and is not included in saved history. Reopened history needs the original PDF and JD uploaded again for a layout-preserving export.
 
 **Rebuilt PDF**, DOCX and TXT remain available separately and do not preserve the source design. The plain-text editor is not a representation of the original-layout PDF.
 
@@ -73,9 +94,9 @@ This is appropriate for a reliable first version with no API costs. It is not se
 
 The server binds to `127.0.0.1`. This is a **single-user local app**, without authentication. Do not expose it to a shared network or public hosting as-is. All local users with access to the app/database can read saved drafts.
 
-Uploads stay in memory and are not written to disk by this app. Unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is not sent to an AI provider. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
+Raw uploads stay in memory. Preparing a paid download stores the generated file and its payment record in SQLite, including preparations that have not yet been paid. Other unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is not sent to an AI provider. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
 
-History stores the original generated draft. Manual editor changes apply to exports only and are **not persisted** to history or reflected in the displayed score. Inputs changing dismiss the old result to avoid displaying stale analysis.
+History stores the original generated draft. Manual editor changes are included in purchased exports and can be saved with **Save edited draft locally**; editing alone does not update the displayed score. Inputs changing dismiss the old result to avoid displaying stale analysis.
 
 For a multi-user deployment, add authentication, per-user database ownership, TLS, explicit allowed origins, retention policy, encrypted storage, and isolated/time-limited document processing. The current file-size limit is not a decompression-bomb defense for untrusted public uploads.
 
@@ -96,12 +117,17 @@ vite.config.js          Frontend build and development proxy
 - `GET /api/health` — server readiness
 - `POST /api/extract` — multipart form with `file`; returns `{ text }`
 - `POST /api/tailor-pdf` — multipart `file`, `jd`, optional `label`, `save`; returns draft and original-layout metadata
-- `POST /api/export-original` — multipart `file`, `jd`, `text`; validates draft and returns the layout-preserving PDF
+- `POST /api/export-original`, `/api/export-edited-original`, `/api/export` — legacy routes; always HTTP 402
 - `POST /api/tailor` — JSON `{ resume, jd, label?, save? }`; returns draft, keyword coverage, evidence and changes
 - `GET /api/history` — last 100 saved application metadata records
 - `GET /api/history/:id` — a saved result
 - `DELETE /api/history/:id` — permanently delete a saved record
-- `POST /api/export` — JSON `{ text, format: "pdf" | "docx" | "txt" }`; attachment response
+- `GET /api/payments/config` — availability, test/live mode and fixed 100-paise price
+- `POST /api/payments/orders` — multipart `text`, `format`, `mode`, optional `file` and `jd`; prepares file and returns Razorpay order plus private download token
+- `POST /api/payments/:id/verify` — checkout proof; requires `X-Download-Token`
+- `GET /api/payments/:id/status` — reconciles captured payment; requires `X-Download-Token`
+- `GET /api/payments/:id/download` — purchased file only; requires `X-Download-Token`
+- `POST /api/payments/webhook` — signed raw Razorpay webhook
 
 ## Validation
 
@@ -110,7 +136,7 @@ npm test
 npm run build
 ```
 
-With the server running, `node server/smoke.js` checks the API, persistence and PDF/DOCX/TXT export-import round trips using disposable sample data.
+With the server running, `node server/smoke.js` checks the API, persistence, ₹1 price and blocked unpaid exports using disposable sample data. Payment and export round trips are covered by `npm test` with a simulated gateway.
 
 Tests cover alias handling, term boundaries, stable ranking, keeping achievements with their source roles, unsupported job vocabulary, and preserving every original resume line.
 

@@ -1,7 +1,7 @@
 import unittest
 from collections import Counter
 import pymupdf as fitz
-from layout import inspect_pdf, export_pdf
+from layout import inspect_pdf, export_pdf, edit_pdf
 
 class LayoutTests(unittest.TestCase):
     def fixture(self):
@@ -38,6 +38,82 @@ class LayoutTests(unittest.TestCase):
                 old={(s['font'],s['size']) for b in doc[0].get_text('dict')['blocks'] for l in b.get('lines',[]) for s in l['spans']}
                 new={(s['font'],s['size']) for b in result[0].get_text('dict')['blocks'] for l in b.get('lines',[]) for s in l['spans']}
                 self.assertEqual(old,new)
+
+    def test_edit_preserves_artwork_and_inserts_bullet(self):
+        raw=self.fixture()
+        with fitz.open(stream=raw,filetype='pdf') as original:
+            text=inspect_pdf(original)['text'].replace('Built React interfaces','Built React and Angular interfaces').replace('- Built Node.js APIs','- Built Node.js APIs\n- Worked with AWS and GCP cloud services')
+            output=edit_pdf(raw,text)
+            with fitz.open(stream=output,filetype='pdf') as result:
+                self.assertEqual(len(result),1)
+                self.assertEqual(result[0].rect,original[0].rect)
+                content=result[0].get_text(sort=True)
+                self.assertIn('Built React and Angular interfaces',content)
+                self.assertIn('Worked with AWS and GCP',content)
+                self.assertNotIn('Built React interfaces',content)
+                self.assertIn('Example University',content)
+                self.assertEqual(len(result[0].get_links()),1)
+                # Unedited title stays identical, including its blue color and size.
+                old=original[0].get_pixmap(clip=fitz.Rect(0,0,595,65)).samples
+                new=result[0].get_pixmap(clip=fitz.Rect(0,0,595,65)).samples
+                self.assertEqual(old,new)
+
+    def test_small_overflow_scales_original_design_to_one_page(self):
+        raw=self.fixture()
+        with fitz.open(stream=raw,filetype='pdf') as doc:
+            page=doc[0]
+            page.insert_text((40,819),'Last original line',fontsize=10)
+            raw=doc.tobytes()
+            text=inspect_pdf(doc)['text'].replace('- Built Node.js APIs','- Built Node.js APIs\n- Worked with cloud services')
+        with fitz.open(stream=edit_pdf(raw,text),filetype='pdf') as result:
+            self.assertEqual(len(result),1)
+            self.assertEqual(result[0].rect,fitz.Rect(0,0,595,842))
+            self.assertIn('Worked with cloud services',result[0].get_text())
+            self.assertIn('Last original line',result[0].get_text())
+            self.assertEqual(len(result[0].get_links()),1)
+
+    def test_copied_bullet_retains_mixed_bold_and_original_artwork(self):
+        doc=fitz.open();page=doc.new_page()
+        page.insert_text((40,40),'Skills',fontsize=12,color=(.2,.3,.6))
+        page.draw_circle((43,77),.8,fill=(.15,.15,.15),color=None)
+        page.insert_text((52,80),'Concepts:',fontname='hebo',fontsize=10)
+        page.insert_text((102,80),'API Gateway, AI Workflows',fontsize=10)
+        page.insert_text((40,120),'Projects',fontsize=12,color=(.2,.3,.6))
+        raw=doc.tobytes()
+        text=inspect_pdf(doc)['text']
+        point=next(line for line in text.splitlines() if 'Concepts:' in line)
+        edited=text.replace(point, point+'\n'+point)
+        with fitz.open(stream=edit_pdf(raw,edited),filetype='pdf') as result:
+            lines=[l for b in result[0].get_text('dict')['blocks'] for l in b.get('lines',[]) if any('Concepts:' in span['text'] for span in l['spans'])]
+            self.assertEqual(len(lines),2)
+            styles=lambda line:[(span['text'],span['font'],round(span['size'],2),span['color']) for span in line['spans']]
+            self.assertEqual(styles(lines[0]),styles(lines[1]))
+            # Pixel equality also catches heavier recreated bullets.
+            rects=[fitz.Rect(line['bbox']) for line in lines]
+            clips=[fitz.Rect(35,rect.y0-.25,300,rect.y1+.25) for rect in rects]
+            pixmaps=[result[0].get_pixmap(clip=clip,matrix=fitz.Matrix(2,2)) for clip in clips]
+            self.assertEqual(pixmaps[0].width,pixmaps[1].width)
+        doc.close()
+
+    def test_new_plain_point_inherits_section_style(self):
+        raw=self.fixture()
+        with fitz.open(stream=raw,filetype='pdf') as doc:
+            text=inspect_pdf(doc)['text'].replace('Education','My new experience point\n\nEducation')
+        with fitz.open(stream=edit_pdf(raw,text),filetype='pdf') as result:
+            spans=[s for b in result[0].get_text('dict')['blocks'] for l in b.get('lines',[]) for s in l['spans']]
+            previous=next(s for s in spans if 'Built Node.js APIs' in s['text'])
+            added=next(s for s in spans if 'My new experience point' in s['text'])
+            self.assertEqual(previous['font'],added['font'])
+            self.assertAlmostEqual(previous['size'],added['size'],places=2)
+            self.assertEqual(previous['color'],added['color'])
+            self.assertAlmostEqual(previous['origin'][0],added['origin'][0],places=2)
+
+    def test_overflow_fails_without_generic_layout(self):
+        raw=self.fixture()
+        with fitz.open(stream=raw,filetype='pdf') as doc:
+            text=inspect_pdf(doc)['text'].replace('General work',' '.join(['extensive experience']*500))
+        with self.assertRaisesRegex(ValueError,'exceed'):
+            edit_pdf(raw,text)
 
     def test_invalid_permutation_rejected(self):
         raw=self.fixture()

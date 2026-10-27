@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { keywords, tailor } from './match.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export function pdfEngine(pdf, action = 'inspect', orders = []) {
+export function pdfEngine(pdf, action = 'inspect', orders = [], text = undefined) {
   const local = path.join(
     root,
     '.venv',
@@ -47,7 +47,7 @@ export function pdfEngine(pdf, action = 'inspect', orders = []) {
       resolve(value);
     });
     child.stdin.on('error', () => {});
-    child.stdin.end(JSON.stringify({ pdf: pdf.toString('base64'), action, orders }));
+    child.stdin.end(JSON.stringify({ pdf: pdf.toString('base64'), action, orders, text }));
   });
 }
 export async function tailorPDF(pdf, jd) {
