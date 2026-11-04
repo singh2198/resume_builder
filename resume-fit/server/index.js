@@ -47,7 +47,7 @@ const payments = createPayments({
   config: {
     requireDurableStorage: process.env.NODE_ENV === 'production',
     appOrigin: process.env.APP_ORIGIN,
-    demoMode: process.env.FREE_HOSTING_DEMO === 'false',
+    demoMode: process.env.FREE_HOSTING_DEMO === 'true',
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
