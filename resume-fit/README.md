@@ -170,3 +170,9 @@ Payment confirmation does not automatically download a file. The download step c
 
 
 Live checkout must run on a public website approved under your Razorpay account's Website and app settings. Live orders from localhost are rejected before checkout to prevent website-mismatch failures. A failed or cancelled checkout closes and rechecks the provider status; only captured payments unlock downloads. The app also polls while checkout is open to recover a captured UPI payment if the browser callback is lost. Failed attempts remain locked and can be checked with Recover previous purchase. Changing the price creates a fresh checkout for the new amount without altering existing orders or files.
+
+## Render Free with persistent purchases
+
+Use `STORAGE_PROVIDER=supabase` to keep purchase metadata, saved drafts and daily AI counters in Supabase Postgres, and immutable purchased files in a private Supabase Storage bucket. This mode creates no SQLite database and never falls back to ephemeral storage. See [SUPABASE-RAZORPAY-SETUP.md](SUPABASE-RAZORPAY-SETUP.md) and run `supabase/schema.sql` before deploying with `render.supabase.yaml`. The original `render.yaml` remains a free demo; `render.production.yaml` is the separate paid-disk option.
+
+Production Live checkout refuses non-durable storage. Local SQLite remains the development default. Hosted Supabase mode sends saved resume data and prepared files to your configured Supabase project; secret keys are backend-only and files are never public. Free-tier sleep, project pausing and quota limits still apply. Existing local data is not automatically migrated.

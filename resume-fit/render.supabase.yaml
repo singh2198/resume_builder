@@ -1,0 +1,39 @@
+# Render Free + external durable storage. Complete supabase/schema.sql first.
+# For the existing service, configure these env vars before changing Blueprint path.
+services:
+  - type: web
+    name: resume-fit-free
+    runtime: docker
+    plan: free
+    numInstances: 1
+    rootDir: resume-fit
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY_HOPS
+        value: '1'
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: STORAGE_PROVIDER
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: resume-fit-purchases
+      - key: FREE_HOSTING_DEMO
+        value: 'false'
+      - key: MAX_AI_REQUESTS_PER_DAY
+        value: '0'
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false

@@ -19,6 +19,8 @@ services:
         value: production
       - key: HOST
         value: 0.0.0.0
+      - key: SQLITE_PERSISTENT_DISK
+        value: 'true'
       - key: DATA_DIR
         value: /app/data
       - key: TRUST_PROXY_HOPS

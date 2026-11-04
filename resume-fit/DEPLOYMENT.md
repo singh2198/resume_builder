@@ -1,3 +1,5 @@
+> For Render Free with persistent payment/history/file storage, use [SUPABASE-RAZORPAY-SETUP.md](SUPABASE-RAZORPAY-SETUP.md) and `render.supabase.yaml`. The paid-disk option below is not required for Supabase mode.
+
 # Production deployment
 
 This app runs React, Express, Python/PyMuPDF and SQLite in one Docker web service. The production Blueprint is `resume-fit/render.production.yaml`; the existing `render.yaml` is a separate free demo and must not collect live payments.

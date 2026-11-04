@@ -3,8 +3,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import mammoth from 'mammoth';
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { loadEnvFile } from 'node:process';
 import { createPayments } from './payments.js';
 import { buildExport } from './exports.js';
@@ -13,19 +12,16 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { tailor } from './match.js';
 import { enhanceResume, enhancementConfigured } from './enhance.js';
-import { browserWorkspaces, initializeHistory, dailyAIBudget } from './workspaces.js';
+import { browserWorkspaces } from './workspaces.js';
+import { createStorage } from './storage/index.js';
 import { pdfEngine, tailorPDF } from './pdf-layout.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 if (existsSync(path.join(root, '.env'))) loadEnvFile(path.join(root, '.env'));
-const dataDir = process.env.DATA_DIR || path.join(root, 'data');
-mkdirSync(dataDir, { recursive: true });
-const db = new DatabaseSync(path.join(dataDir, 'resume-fit.sqlite'));
-db.exec(
-  'CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT NOT NULL, label TEXT NOT NULL, result TEXT NOT NULL)',
-);
-const historyStore = initializeHistory(db);
-const aiBudget = dailyAIBudget(db);
+const storage = await createStorage({ root });
+const aiLimit = Number(process.env.MAX_AI_REQUESTS_PER_DAY || 100);
+if (!Number.isInteger(aiLimit) || aiLimit < 0)
+  throw Error('MAX_AI_REQUESTS_PER_DAY must be a nonnegative integer.');
 const app = express();
 if (process.env.TRUST_PROXY_HOPS) app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
 app.use(
@@ -45,12 +41,13 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
 });
 const payments = createPayments({
-  db,
+  store: storage,
   upload,
   buildExport,
   config: {
+    requireDurableStorage: process.env.NODE_ENV === 'production',
     appOrigin: process.env.APP_ORIGIN,
-    demoMode: process.env.FREE_HOSTING_DEMO === 'true',
+    demoMode: process.env.FREE_HOSTING_DEMO === 'false',
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
@@ -152,11 +149,11 @@ app.post(
         return res.status(503).json({
           error: 'AI improvements are temporarily unavailable. Basic tailoring is still available.',
         });
-      let allowed = false;
-      aiBudget(req, res, () => {
-        allowed = true;
-      });
-      if (!allowed) return;
+      if (!(await storage.consumeBudget(aiLimit)))
+        return res.status(429).json({
+          error:
+            'The site has reached its daily AI request limit. Try tomorrow; editing and basic tailoring are still available.',
+        });
       res.json(await enhanceResume({ resume, jd, facts }));
     } catch (error) {
       res.status(error.status || 502).json({
@@ -165,26 +162,29 @@ app.post(
     }
   }),
 );
-app.post('/api/tailor', (req, res) => {
-  const { resume, jd, save = false, label = 'Untitled application' } = req.body;
-  if (!valid(resume) || !valid(jd))
-    return res.status(400).json({
-      error: 'Resume and job description must each contain 20–60,000 characters.',
-    });
-  const result = tailor(resume.trim(), jd.trim());
-  persistResult(result, save, label, req.workspace);
-  res.json(result);
-});
-function persistResult(result, save, label, owner) {
+app.post(
+  '/api/tailor',
+  wrap(async (req, res) => {
+    const { resume, jd, save = false, label = 'Untitled application' } = req.body;
+    if (!valid(resume) || !valid(jd))
+      return res.status(400).json({
+        error: 'Resume and job description must each contain 20–60,000 characters.',
+      });
+    const result = tailor(resume.trim(), jd.trim());
+    await persistResult(result, save, label, req.workspace);
+    res.json(result);
+  }),
+);
+async function persistResult(result, save, label, owner) {
   if (save === true || save === 'true') {
     result.id = randomUUID();
-    historyStore.save.run(
-      result.id,
-      new Date().toISOString(),
-      String(label || 'Untitled application').slice(0, 100),
-      JSON.stringify(result),
+    await storage.saveRun({
+      id: result.id,
+      created: new Date().toISOString(),
+      label: String(label || 'Untitled application').slice(0, 100),
+      result,
       owner,
-    );
+    });
   }
 }
 app.post(
@@ -197,7 +197,7 @@ app.post(
       });
     try {
       const { result } = await tailorPDF(req.file.buffer, req.body.jd);
-      persistResult(result, req.body.save, req.body.label, req.workspace);
+      await persistResult(result, req.body.save, req.body.label, req.workspace);
       res.json(result);
     } catch (error) {
       res.status(422).json({ error: error.message });
@@ -227,30 +227,40 @@ app.post(
     }
   }),
 );
-app.post('/api/drafts', (req, res) => {
-  const { text, jd = '', label } = req.body;
-  if (!valid(text, 1) || typeof jd !== 'string' || jd.length > 60000)
-    return res.status(400).json({ error: 'Draft must contain 1–60,000 characters.' });
-  const result = {
-    ...tailor(text, jd),
-    updatedResume: text,
-    changes: [],
-    layoutMode: false,
-  };
-  persistResult(result, true, label, req.workspace);
-  res.status(201).json(result);
-});
-app.get('/api/history', (req, res) => res.json(historyStore.list.all(req.workspace)));
-app.get('/api/history/:id', (req, res) => {
-  const row = historyStore.find.get(req.params.id, req.workspace);
-  row
-    ? res.json(JSON.parse(row.result))
-    : res.status(404).json({ error: 'Saved result not found.' });
-});
-app.delete('/api/history/:id', (req, res) => {
-  historyStore.remove.run(req.params.id, req.workspace);
-  res.status(204).end();
-});
+app.post(
+  '/api/drafts',
+  wrap(async (req, res) => {
+    const { text, jd = '', label } = req.body;
+    if (!valid(text, 1) || typeof jd !== 'string' || jd.length > 60000)
+      return res.status(400).json({ error: 'Draft must contain 1–60,000 characters.' });
+    const result = {
+      ...tailor(text, jd),
+      updatedResume: text,
+      changes: [],
+      layoutMode: false,
+    };
+    await persistResult(result, true, label, req.workspace);
+    res.status(201).json(result);
+  }),
+);
+app.get(
+  '/api/history',
+  wrap(async (req, res) => res.json(await storage.listRuns(req.workspace))),
+);
+app.get(
+  '/api/history/:id',
+  wrap(async (req, res) => {
+    const result = await storage.getRun(req.params.id, req.workspace);
+    result ? res.json(result) : res.status(404).json({ error: 'Saved result not found.' });
+  }),
+);
+app.delete(
+  '/api/history/:id',
+  wrap(async (req, res) => {
+    await storage.deleteRun(req.params.id, req.workspace);
+    res.status(204).end();
+  }),
+);
 app.use(express.static(path.join(root, 'dist')));
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Endpoint not found.' });
@@ -258,6 +268,7 @@ app.get('*', (req, res) => {
 });
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
+  if (error.status === 503) return res.status(503).json({ error: error.message });
   res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
     error:
       error.code === 'LIMIT_FILE_SIZE'

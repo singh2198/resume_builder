@@ -1,4 +1,5 @@
 import express from 'express';
+import { sqliteStore } from './storage/sqlite.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 export const PRICE = 100; // ₹1 in paise. Never accept an amount from the browser.
@@ -9,22 +10,22 @@ const validSignature = (value, expected) =>
   timingSafeEqual(Buffer.from(value, 'hex'), Buffer.from(expected, 'hex'));
 const httpError = (status, message) => Object.assign(Error(message), { status });
 
-export function createPayments({ db, upload, buildExport, config, fetchImpl = fetch }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS purchases (
-    id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, created TEXT NOT NULL,
-    order_id TEXT UNIQUE, payment_id TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
-    filename TEXT NOT NULL, content_type TEXT NOT NULL, artifact BLOB NOT NULL
-  )`);
-  // Preserve the price of already-created purchases; new orders use the current price.
-  if (
-    !db
-      .prepare('PRAGMA table_info(purchases)')
-      .all()
-      .some((column) => column.name === 'amount')
-  )
-    db.exec('ALTER TABLE purchases ADD COLUMN amount INTEGER NOT NULL DEFAULT 100');
+export function createPayments({
+  db,
+  store: suppliedStore,
+  upload,
+  buildExport,
+  config,
+  fetchImpl = fetch,
+}) {
+  const store = suppliedStore || sqliteStore(db);
   const router = express.Router();
   const ready = () => {
+    if (config.requireDurableStorage && config.keyId?.startsWith('rzp_live_') && !store.durable)
+      throw httpError(
+        503,
+        'Live payments require persistent database and file storage. Configure Supabase before accepting payments.',
+      );
     if (config.demoMode && !config.keyId?.startsWith('rzp_test_'))
       throw httpError(
         503,
@@ -55,14 +56,14 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
       );
     return response.json();
   }
-  function purchase(req) {
-    const row = db.prepare('SELECT * FROM purchases WHERE id = ?').get(req.params.id);
+  async function purchase(req) {
+    const row = await store.getPurchase(req.params.id);
     const token = req.get('X-Download-Token');
     if (!row || typeof token !== 'string' || !validSignature(digest(token), row.token_hash))
       throw httpError(404, 'Download not found in this browser session.');
     return row;
   }
-  function confirm(row, payment) {
+  async function confirm(row, payment) {
     if (
       payment.order_id !== row.order_id ||
       payment.amount !== row.amount ||
@@ -70,9 +71,9 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     )
       throw httpError(400, 'Payment does not match the amount of this purchased file.');
     if (payment.status !== 'captured' || payment.captured !== true) return false;
-    db.prepare(
-      "UPDATE purchases SET status = 'paid', payment_id = ? WHERE id = ? AND status = 'pending'",
-    ).run(payment.id, row.id);
+    if (row.status === 'paid' && row.payment_id !== payment.id)
+      throw httpError(400, 'This order is already linked to a different payment.');
+    await store.markPaid(row.id, payment.id);
     return true;
   }
   async function reconcile(row) {
@@ -80,7 +81,7 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     const payments = await razorpay(`/orders/${encodeURIComponent(row.order_id)}/payments`);
     const items = payments.items || [];
     for (const payment of items) {
-      if (payment.status === 'captured' && confirm(row, payment)) return { paid: true };
+      if (payment.status === 'captured' && (await confirm(row, payment))) return { paid: true };
     }
     if (items.some((payment) => payment.status === 'authorized'))
       return { paid: false, paymentStatus: 'authorized' };
@@ -100,6 +101,8 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
   }
   function checkoutBlockedReason(req) {
     if (!config.keyId?.startsWith('rzp_live_')) return null;
+    if (config.requireDurableStorage && !store.durable)
+      return 'Live payments require persistent database and file storage. Configure Supabase first.';
     const origin = req.get('Origin') || config.appOrigin || `${req.protocol}://${req.get('Host')}`;
     let hostname;
     try {
@@ -137,6 +140,8 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
       // Checkout key IDs are public; the secret remains server-only.
       keyId: config.keyId || null,
       demoMode: !!config.demoMode,
+      storageProvider: store.kind,
+      durableStorage: store.durable,
       checkoutAllowed: !checkoutBlockedReason(req),
       blockedReason: checkoutBlockedReason(req),
       amount: PRICE,
@@ -160,16 +165,16 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
       const id = randomUUID(),
         token = randomBytes(32).toString('hex');
       // Persist the file first, so payment is never requested for an unavailable export.
-      db.prepare(
-        'INSERT INTO purchases (id, token_hash, created, filename, content_type, artifact, amount) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      ).run(
-        id,
-        digest(token),
-        new Date().toISOString(),
-        artifact.filename,
-        artifact.type,
-        artifact.bytes,
-        PRICE,
+      await store.createPurchase(
+        {
+          id,
+          token_hash: digest(token),
+          created: new Date().toISOString(),
+          filename: artifact.filename,
+          content_type: artifact.type,
+          amount: PRICE,
+        },
+        artifact,
       );
       let order;
       try {
@@ -184,9 +189,11 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
         });
         if (!order.id || order.amount !== PRICE || order.currency !== 'INR')
           throw httpError(502, 'Razorpay returned an invalid order.');
-        db.prepare('UPDATE purchases SET order_id = ? WHERE id = ?').run(order.id, id);
+        await store.attachOrder(id, order.id);
       } catch (error) {
-        db.prepare('DELETE FROM purchases WHERE id = ?').run(id);
+        try {
+          await store.deletePendingPurchase(id);
+        } catch {}
         throw error;
       }
       res.status(201).json({
@@ -203,14 +210,14 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
   router.get(
     '/:id/status',
     route(async (req, res) => {
-      res.json(await reconcile(purchase(req)));
+      res.json(await reconcile(await purchase(req)));
     }),
   );
   router.post(
     '/:id/verify',
     route(async (req, res) => {
       ready();
-      const row = purchase(req);
+      const row = await purchase(req);
       const {
         razorpay_order_id: orderId,
         razorpay_payment_id: paymentId,
@@ -229,15 +236,18 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
         throw httpError(400, 'Payment signature verification failed.');
       const payment = await razorpay(`/payments/${encodeURIComponent(paymentId)}`);
       if (payment.id !== paymentId) throw httpError(400, 'Payment ID mismatch.');
-      res.json({ paid: confirm(row, payment) });
+      res.json({ paid: await confirm(row, payment) });
     }),
   );
   router.get(
     '/:id/download',
     route(async (req, res) => {
-      const row = purchase(req);
+      const row = await purchase(req);
       if (row.status !== 'paid') throw httpError(402, 'Complete payment before downloading.');
-      res.attachment(row.filename).type(row.content_type).send(Buffer.from(row.artifact));
+      res
+        .attachment(row.filename)
+        .type(row.content_type)
+        .send(await store.readArtifact(row));
     }),
   );
   // Mounted with express.raw BEFORE the application's JSON parser.
@@ -255,8 +265,8 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     if (['payment.captured', 'order.paid'].includes(event.event)) {
       const payment = event.payload?.payment?.entity;
       if (payment?.order_id) {
-        const row = db.prepare('SELECT * FROM purchases WHERE order_id = ?').get(payment.order_id);
-        if (row) confirm(row, payment);
+        const row = await store.getPurchaseByOrder(payment.order_id);
+        if (row) await confirm(row, payment);
       }
     }
     res.json({ ok: true });
