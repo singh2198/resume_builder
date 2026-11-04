@@ -1,7 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { applyImprovement } from './enhancements.js';
 
-export default function Enhancements({ draft, jd, disabled, onApply }) {
+export default function Enhancements({
+  draft,
+  jd,
+  disabled,
+  onApply,
+  requestId = 0,
+  onBusyChange,
+}) {
   const [facts, setFacts] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -11,9 +18,19 @@ export default function Enhancements({ draft, jd, disabled, onApply }) {
   const [source, setSource] = useState('');
   const current = useRef({ draft, jd, facts });
   current.current = { draft, jd, facts };
+  const lastRequest = useRef(0);
+  const generateRef = useRef(null);
+  useEffect(() => {
+    if (requestId > lastRequest.current) {
+      lastRequest.current = requestId;
+      generateRef.current();
+    }
+  }, [requestId]);
   async function generate() {
     const requested = { resume: draft, jd, facts };
     setBusy(true);
+    onBusyChange?.(true);
+    setAnalysis(null);
     setError('');
     try {
       const response = await fetch('/api/enhance', {
@@ -37,8 +54,10 @@ export default function Enhancements({ draft, jd, disabled, onApply }) {
       setError(e.message);
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   }
+  generateRef.current = generate;
   return (
     <section
       className="card editor-card enhancement-card"
@@ -64,9 +83,9 @@ export default function Enhancements({ draft, jd, disabled, onApply }) {
         placeholder="Name the role/project and explain what you actually built, tools used and outcomes. For example: In Task Planner, I also wrote tests for the dashboard using React Testing Library. New points need this evidence."
       />
       <p className="privacy-note">
-        Clicking Generate sends the current draft, job description and additional experience to
-        OpenAI. API usage may cost money. Configure OPENAI_API_KEY in the server .env; never paste
-        your key here.
+        Clicking Generate sends the current draft, job description and additional experience to your
+        configured AI provider (Gemini or OpenAI). API usage may cost money. Review each suggestion
+        against your actual experience before applying it.
       </p>
       <button
         type="button"

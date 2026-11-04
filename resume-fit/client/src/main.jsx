@@ -2,7 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 import Enhancements from './Enhancements.jsx';
-import { paidDownload, recoverDownload, savedPurchase, paymentConfig } from './payments.js';
+import {
+  payForResume,
+  recoverPayment,
+  downloadPurchased,
+  savedPurchase,
+  paymentConfig,
+} from './payments.js';
 const sampleResume = `ALEX MORGAN
 Full Stack Developer
 alex@example.com | Bengaluru, India
@@ -44,11 +50,19 @@ function bulletComparison(change) {
   return after.map((text, index) => {
     const original = before.findIndex((value, i) => value === text && !used.has(i));
     if (original >= 0) used.add(original);
-    return { text, from: original + 1, to: index + 1, moved: original >= 0 && original !== index };
+    return {
+      text,
+      from: original + 1,
+      to: index + 1,
+      moved: original >= 0 && original !== index,
+    };
   });
 }
 function ResumeChanges({ result, edited }) {
-  const groups = result.changes.map((change) => ({ ...change, points: bulletComparison(change) }));
+  const groups = result.changes.map((change) => ({
+    ...change,
+    points: bulletComparison(change),
+  }));
   const moved = groups.reduce(
     (total, group) => total + group.points.filter((point) => point.moved).length,
     0,
@@ -200,45 +214,74 @@ function GapSuggestions({ suggestions, onAdd, disabled }) {
     </section>
   );
 }
+const wizardSteps = [
+  'Upload & tailor',
+  'Match score',
+  'AI & edit',
+  'Compare',
+  'Pay ₹1',
+  'Download',
+];
+
+function DraftComparison({ original, draft }) {
+  const before = new Set(original.split('\n'));
+  const after = new Set(draft.split('\n'));
+  return (
+    <div className="draft-comparison">
+      {[
+        { title: 'Original resume', text: original, other: after, kind: 'removed' },
+        { title: 'Your final draft', text: draft, other: before, kind: 'added' },
+      ].map((side) => (
+        <section className="card comparison-side" key={side.title} aria-label={side.title}>
+          <h3>{side.title}</h3>
+          <div className="comparison-text">
+            {side.text.split('\n').map((line, i) => (
+              <div key={i} className={line.trim() && !side.other.has(line) ? side.kind : ''}>
+                <span className="line-number" aria-hidden="true">
+                  {i + 1}
+                </span>
+                <span>{line || ' '}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function App() {
-  const [resume, setResume] = useState(''),
-    [jd, setJd] = useState(''),
-    [label, setLabel] = useState(''),
-    [save, setSave] = useState(false),
-    [result, setResult] = useState(null),
-    [edited, setEdited] = useState(''),
-    [busy, setBusy] = useState(''),
-    [error, setError] = useState(''),
-    [history, setHistory] = useState([]),
-    [view, setView] = useState('workspace'),
-    [notice, setNotice] = useState('');
-  const [editing, setEditing] = useState(false);
-  const [finalReady, setFinalReady] = useState(false);
+  const [resume, setResume] = useState('');
+  const [jd, setJd] = useState('');
+  const [label, setLabel] = useState('');
+  const [save, setSave] = useState(false);
+  const [result, setResult] = useState(null);
+  const [originalText, setOriginalText] = useState('');
+  const [edited, setEdited] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [view, setView] = useState('workspace');
+  const [history, setHistory] = useState([]);
+  const [step, setStep] = useState(1);
+  const [reviewed, setReviewed] = useState(false);
+  const [format, setFormat] = useState('pdf');
+  const [purchase, setPurchase] = useState(null);
   const [payment, setPayment] = useState(null);
+  const [sourcePdf, setSourcePdf] = useState(null);
+  const [pdfResult, setPdfResult] = useState(null);
+  const [preview, setPreview] = useState([]);
+  const [aiRequest, setAiRequest] = useState(0);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [downloaded, setDownloaded] = useState(false);
+  const locked = !!busy || aiBusy;
+  const lastStep = purchase ? 6 : reviewed ? 5 : result ? 4 : 1;
+
   useEffect(() => {
     paymentConfig()
       .then(setPayment)
       .catch(() => setPayment({ configured: false }));
   }, []);
-  useEffect(() => {
-    setFinalReady(false);
-  }, [edited, result]);
-  function finishEditing() {
-    if (!edited.trim()) {
-      setError('Add resume text before finishing.');
-      return;
-    }
-    setEditing(false);
-    setFinalReady(true);
-    setNotice('Your draft is ready. Download costs ₹1; the file is prepared before payment.');
-    setTimeout(
-      () => document.getElementById('final-resume')?.scrollIntoView({ behavior: 'smooth' }),
-      50,
-    );
-  }
-  const [sourcePdf, setSourcePdf] = useState(null),
-    [pdfResult, setPdfResult] = useState(null),
-    [preview, setPreview] = useState([]);
   const refresh = () =>
     api('/api/history')
       .then(setHistory)
@@ -246,6 +289,17 @@ function App() {
   useEffect(() => {
     refresh();
   }, []);
+  useEffect(() => {
+    if (view === 'workspace') {
+      document.getElementById('step-title')?.focus({ preventScroll: true });
+      document.querySelector('.wizard-nav')?.scrollIntoView({ block: 'start' });
+    }
+  }, [step, view]);
+  function go(next) {
+    setError('');
+    setNotice('');
+    setStep(next);
+  }
   async function perform(name, fn) {
     setBusy(name);
     setError('');
@@ -258,6 +312,16 @@ function App() {
       setBusy('');
     }
   }
+  function invalidatePurchase() {
+    setReviewed(false);
+    setPurchase(null);
+    setDownloaded(false);
+  }
+  function updateDraft(text) {
+    setEdited(text);
+    setPreview([]);
+    invalidatePurchase();
+  }
   function setInput(which, value) {
     if (which === 'resume') {
       setResume(value);
@@ -266,6 +330,8 @@ function App() {
     setResult(null);
     setPdfResult(null);
     setPreview([]);
+    setAiRequest(0);
+    invalidatePurchase();
   }
   async function upload(e, which) {
     const file = e.target.files[0];
@@ -278,9 +344,9 @@ function App() {
       setInput(which, output.text);
       if (which === 'resume' && output.originalLayout) setSourcePdf(file);
       setNotice(
-        output.originalLayout
-          ? 'PDF imported in visual reading order. Original-layout export keeps its fonts, colors, spacing and page size.'
-          : 'File imported. DOCX/TXT inputs use rebuilt exports.',
+        output.originalLayout && which === 'resume'
+          ? 'PDF attached. Your original design will be used for the final PDF.'
+          : 'File imported.',
       );
     });
   }
@@ -311,33 +377,25 @@ function App() {
         });
         setPdfResult(null);
       }
-      setPreview([]);
+      setOriginalText(resume);
       setResult(data);
       setEdited(data.updatedResume);
-      if (sourcePdf) {
-        try {
-          setPreview((await fetchPreview({ file: sourcePdf, jd }, data.updatedResume)).pages);
-        } catch (e) {
-          setNotice('Your original-layout PDF is ready. Preview could not load: ' + e.message);
-        }
-      }
+      setPreview([]);
+      setAiRequest(0);
+      invalidatePurchase();
+      setStep(2);
       if (save) await refresh();
-      setTimeout(
-        () => document.getElementById('results')?.scrollIntoView({ behavior: 'smooth' }),
-        50,
-      );
     });
   }
-  async function download(format) {
-    if (format === 'pdf' && result?.layoutMode && !pdfResult && edited === result.updatedResume) {
-      setError(
-        'Re-upload your original PDF to download this saved draft with its original formatting.',
-      );
-      return;
-    }
-    await perform('Preparing download', async () => {
+  async function pay() {
+    await perform('Preparing your final file', async () => {
       const original = format === 'pdf' && pdfResult;
-      await paidDownload(
+      if (format === 'pdf' && result?.layoutMode && !pdfResult)
+        throw Error(
+          'Re-upload the original PDF in Step 1 to preserve its design, or choose TXT / DOCX.',
+        );
+      setPayment(await paymentConfig());
+      const paid = await payForResume(
         {
           text: edited,
           format,
@@ -347,22 +405,83 @@ function App() {
               : 'edited-original'
             : 'rebuilt',
           jd: original ? pdfResult.jd : '',
-          layoutMode: !original && !!result?.layoutMode && edited === result.updatedResume,
+          layoutMode: false,
         },
         original ? pdfResult.file : null,
         setBusy,
       );
+      setPurchase(paid);
+      setDownloaded(false);
+      setStep(6);
+      setNotice('Payment confirmed. Your purchased file is ready to download.');
+    });
+  }
+  async function recover() {
+    await perform('Checking your previous payment', async () => {
+      const paid = await recoverPayment(setBusy);
+      setPurchase(paid);
+      setDownloaded(false);
+      setView('workspace');
+      setStep(6);
+      setNotice('Recovered your previously purchased file. It may differ from your current draft.');
+    });
+  }
+  async function download() {
+    await perform('Downloading your resume', async () => {
+      await downloadPurchased(purchase, setBusy);
+      setDownloaded(true);
       setNotice(
-        'Payment confirmed. Your download is ready. You can retry this file without paying again.',
+        'Download started. You can download this same purchased file again without paying.',
       );
     });
   }
-  async function originalPDF(action) {
-    if (action === 'download') return download('pdf');
-    await perform('Preparing original-layout preview', async () => {
-      setPreview((await fetchPreview(pdfResult, edited)).pages);
+  async function openHistory(item) {
+    await perform('Loading saved draft', async () => {
+      const data = await api('/api/history/' + item.id);
+      setResult(data);
+      setEdited(data.updatedResume);
+      setOriginalText('');
+      setResume('');
+      setJd('');
+      setLabel(item.label);
+      setSourcePdf(null);
+      setPdfResult(null);
+      setPreview([]);
+      setAiRequest(0);
+      invalidatePurchase();
+      setView('workspace');
+      setStep(3);
+      setNotice(
+        'Saved draft loaded. Paste its job description below to use AI. The original resume is not stored with this draft.',
+      );
     });
   }
+  const headings = [
+    [
+      'Add your resume and job description',
+      'Upload files or paste text, then tailor your resume to the role.',
+    ],
+    [
+      'See how your resume matches',
+      'Review the recognized job keywords before improving your draft.',
+    ],
+    [
+      'Make your resume stronger',
+      'Generate suggestions with AI, review them, and edit your final wording.',
+    ],
+    [
+      'Compare before you continue',
+      'Review your original resume beside the latest draft, including AI and manual edits.',
+    ],
+    [
+      'Choose your file and pay ₹1',
+      'Your exact file is prepared before checkout. Payment unlocks that file.',
+    ],
+    [
+      'Your resume is ready',
+      'Download your purchased file. Repeating this download does not cost extra.',
+    ],
+  ];
   return (
     <div className="app">
       <aside>
@@ -373,32 +492,30 @@ function App() {
           </span>
         </a>
         <div className="nav-caption">YOUR APPLICATION TOOLKIT</div>
-        <nav>
+        <nav aria-label="Workspace navigation">
           <button
+            disabled={locked}
             className={view === 'workspace' ? 'selected' : ''}
             onClick={() => setView('workspace')}
           >
-            ▦ <span>Resume workspace</span>
+            ▦ Resume workspace
           </button>
           <button
+            disabled={locked}
             className={view === 'history' ? 'selected' : ''}
             onClick={() => {
               setView('history');
               refresh();
             }}
           >
-            ◷ <span>Saved applications</span>
-            <small>{history.length}</small>
+            ◷ Saved applications <small>{history.length}</small>
           </button>
         </nav>
         <div className="aside-note">
           <div className="shield">◇</div>
           <strong>Your experience. Better aligned.</strong>
-          <p>Relevant details first. Original facts preserved. You stay in control.</p>
-          <span className="local-dot">●</span> Your resume workspace
-        </div>
-        <div className="aside-bottom">
-          REACT + NODE.JS <span>v1.0</span>
+          <p>Six simple steps. Review every change. Keep your story true.</p>
+          <span className="local-dot">●</span> Editing and previews are free
         </div>
       </aside>
       <main>
@@ -407,29 +524,54 @@ function App() {
             Workspace <span className="slash">/</span>{' '}
             {view === 'workspace' ? 'Tailor your resume' : 'Saved applications'}
           </span>
-          <span className="private">◉ Private by default</span>
+          <span className="private">Review. Refine. Apply.</span>
         </header>
-        <div className="content">
-          <div className="eyebrow">MAKE YOUR EXPERIENCE COUNT</div>
+        <div className="content wizard-content">
+          <div className="eyebrow">YOUR NEXT OPPORTUNITY STARTS HERE</div>
           <div className="title-row">
             <div>
               <h1>
                 {view === 'workspace'
-                  ? 'The right experience.\nIn the right order.'
-                  : 'Your next opportunity,\norganized.'}
+                  ? 'A better resume, step by step.'
+                  : 'Your saved applications.'}
               </h1>
               <p className="subtitle">
                 {view === 'workspace'
-                  ? 'Connect your resume to the role you want, without changing your story.'
-                  : 'Revisit your saved resume drafts and download them again.'}
+                  ? 'From your first upload to your final download, one clear step at a time.'
+                  : 'Pick up a saved draft and continue editing.'}
               </p>
             </div>
-            <span className="version">
-              FACT-FIRST
-              <br />
-              <b>Resume tailoring</b>
-            </span>
           </div>
+          {view === 'workspace' && (
+            <>
+              <nav className="wizard-nav" aria-label="Resume steps">
+                <ol>
+                  {wizardSteps.map((name, i) => (
+                    <li key={name}>
+                      <button
+                        type="button"
+                        aria-current={step === i + 1 ? 'step' : undefined}
+                        aria-label={`Step ${i + 1}: ${name}`}
+                        disabled={locked || i + 1 > lastStep || (!result && i > 0 && i < 5)}
+                        className={step === i + 1 ? 'active' : step > i + 1 ? 'complete' : ''}
+                        onClick={() => go(i + 1)}
+                      >
+                        <span className="step-circle">{i + 1}</span>
+                        <span>{name}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              </nav>
+              <div className="step-heading">
+                <span className="step-kicker">STEP {step} OF 6</span>
+                <h2 id="step-title" tabIndex={-1}>
+                  {headings[step - 1][0]}
+                </h2>
+                <p>{headings[step - 1][1]}</p>
+              </div>
+            </>
+          )}
           {error && (
             <div role="alert" className="alert">
               {error}
@@ -446,54 +588,21 @@ function App() {
             </div>
           )}
           {payment?.demoMode && (
-            <section className="notice" aria-label="Free demo limitations">
-              <strong>Free public demo</strong>
-              <p>
-                Saved history and test purchases are temporary and may disappear when the server
-                sleeps or restarts. Real payments are disabled. AI generation is off by default;
-                editing, keyword matching and PDF previews are available.
-              </p>
-            </section>
+            <div className="notice">
+              <strong>Demo mode</strong>
+              <p>Real payments are disabled. Saved files may disappear when the demo restarts.</p>
+            </div>
           )}
-          <section className="notice" aria-label="Download payment">
-            <strong>Resume downloads · ₹1 per file</strong>
-            <p>
-              Editing and previewing are free. Pay securely with Razorpay before downloading.
-              Retrying the same purchased file is free.
-            </p>
-            {payment?.testMode && (
-              <p>Test mode: payments are simulated; no real money is charged.</p>
-            )}
-            {payment && !payment.configured && (
-              <p>Downloads will be available once Razorpay is configured.</p>
-            )}
-            {savedPurchase() && (
-              <button
-                disabled={!!busy}
-                onClick={() =>
-                  perform('Recovering download', async () => {
-                    await recoverDownload(setBusy);
-                    setNotice(
-                      'Your download is ready. A confirmed payment is never charged again.',
-                    );
-                  })
-                }
-              >
-                Recover last download
-              </button>
-            )}
-          </section>
           {view === 'history' ? (
             <section className="card history">
               <h2>Saved applications</h2>
               <p>
-                Saved on this server. On the public app, history belongs to this browser for up to
-                30 days. Clearing cookies or changing devices loses access. Deleting an entry
-                permanently removes its stored draft.
+                History belongs to this browser on the hosted app. Saved drafts do not include the
+                source PDF or original job description.
               </p>
-              {history.length === 0 ? (
+              {!history.length ? (
                 <div className="empty">
-                  No saved applications yet. Turn on “Save this result” when tailoring a resume.
+                  No saved applications yet. Select “Save this result” in Step 1.
                 </div>
               ) : (
                 history.map((item) => (
@@ -502,26 +611,11 @@ function App() {
                       <strong>{item.label}</strong>
                       <p>{new Date(item.created).toLocaleString()}</p>
                     </div>
-                    <button
-                      disabled={!!busy}
-                      onClick={() =>
-                        perform('Loading draft', async () => {
-                          const data = await api('/api/history/' + item.id);
-                          setResult(data);
-                          setEdited(data.updatedResume);
-                          setPdfResult(null);
-                          setPreview([]);
-                          setView('workspace');
-                          setNotice(
-                            'Loaded a saved draft. Its analysis belongs to the saved version.',
-                          );
-                        })
-                      }
-                    >
+                    <button disabled={locked} onClick={() => openHistory(item)}>
                       Open draft
                     </button>
                     <button
-                      disabled={!!busy}
+                      disabled={locked}
                       onClick={() =>
                         perform('Deleting draft', async () => {
                           await api('/api/history/' + item.id, { method: 'DELETE' });
@@ -537,370 +631,265 @@ function App() {
             </section>
           ) : (
             <>
-              <form onSubmit={generate}>
-                <div className="steps">
-                  <span>
-                    <b>01</b> Add your details
-                  </span>
-                  <span>
-                    <b>02</b> Review the match
-                  </span>
-                  <span>
-                    <b>03</b> Export your resume
-                  </span>
-                </div>
-                <div className="input-grid">
-                  {[
-                    {
-                      which: 'resume',
-                      title: 'Your resume',
-                      desc: 'Start with the experience you already have.',
-                      value: resume,
-                    },
-                    {
-                      which: 'jd',
-                      title: 'The job description',
-                      desc: 'Add the requirements for your next role.',
-                      value: jd,
-                    },
-                  ].map((item, i) => (
-                    <section className="card input-card" key={item.which}>
-                      <div className="card-heading">
-                        <span className="number">0{i + 1}</span>
-                        <div>
-                          <h2>{item.title}</h2>
-                          <p>{item.desc}</p>
-                        </div>
-                      </div>
-                      <label className="upload">
-                        <span className="upload-icon">↥</span>
-                        <strong>Choose a file</strong>
-                        <span>PDF, DOCX or TXT · up to 5 MB</span>
-                        <input
-                          aria-label={'Upload ' + item.title}
-                          disabled={!!busy}
-                          type="file"
-                          accept=".pdf,.docx,.txt"
-                          onChange={(e) => upload(e, item.which)}
-                        />
-                      </label>
-                      <div className="text-label">
-                        <label htmlFor={item.which}>
-                          {item.which === 'resume' && sourcePdf
-                            ? 'Extracted text · original PDF attached'
-                            : 'Or paste the text below'}
-                        </label>
-                        <span>{item.value.length.toLocaleString()} / 60,000</span>
-                      </div>
-                      <textarea
-                        id={item.which}
-                        required
-                        minLength={20}
-                        maxLength={60000}
-                        value={item.value}
-                        readOnly={item.which === 'resume' && !!sourcePdf}
-                        disabled={!!busy}
-                        onChange={(e) => setInput(item.which, e.target.value)}
-                        placeholder={
-                          item.which === 'resume'
-                            ? 'Your name, experience, projects, skills and education…'
-                            : 'Job title, responsibilities, required skills and qualifications…'
-                        }
-                      />
-                    </section>
-                  ))}
-                </div>
-                {sourcePdf && (
-                  <div className="layout-banner">
-                    <strong>Original PDF layout ready</strong>
-                    <span>
-                      {sourcePdf.name} · fonts, colors and spacing come from your file. Source text
-                      is locked to keep the original design attached. Upload another file to replace
-                      it.
-                    </span>
-                  </div>
-                )}
-                <div className="action-card">
-                  <div>
-                    <label className="app-label" htmlFor="label">
-                      Application name <span>(optional)</span>
-                    </label>
-                    <input
-                      id="label"
-                      className="label-input"
-                      value={label}
-                      maxLength={100}
-                      onChange={(e) => setLabel(e.target.value)}
-                      placeholder="e.g. Acme · Full Stack Developer"
-                    />
-                    <label className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={save}
-                        onChange={(e) => setSave(e.target.checked)}
-                      />{' '}
-                      Save this result
-                    </label>
-                  </div>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      disabled={!!busy}
-                      className="secondary"
-                      onClick={() => {
-                        setSourcePdf(null);
-                        setPdfResult(null);
-                        setPreview([]);
-                        setResume(sampleResume);
-                        setJd(sampleJD);
-                        setLabel('Example Company · Full Stack Developer');
-                        setResult(null);
-                      }}
-                    >
-                      Try sample data
-                    </button>
-                    <button
-                      className="primary"
-                      disabled={!!busy || resume.trim().length < 20 || jd.trim().length < 20}
-                    >
-                      {busy || 'Tailor my resume'} <span>↗</span>
-                    </button>
-                  </div>
-                </div>
-                <p className="privacy-note">
-                  ◇ Prepared downloads and payment records are stored on this server. Resume content
-                  is not sent to Razorpay. Optional AI improvements send your draft and job
-                  description to OpenAI only when you click Generate AI improvements.
-                </p>
-              </form>
-              {result && (
-                <section id="results" className="results">
-                  <div className="results-heading">
-                    <div className="eyebrow">YOUR APPLICATION, REFINED</div>
-                    <h2>Review before you send.</h2>
-                    <p>
-                      Review the prioritized draft, generate stronger wording and new points from
-                      real experience, then edit before exporting.
-                    </p>
-                  </div>
-                  <div className="analysis-grid">
-                    <div className="card metric">
-                      <span>JD keyword coverage</span>
-                      <strong>
-                        {result.score === null ? 'N/A' : result.score + '%'}
-                        <small>
-                          {result.matched.length} of {result.keywords.length} recognized keywords
-                        </small>
-                      </strong>
-                      <progress max="100" value={result.score || 0} />
-                      <p>
-                        {result.score === null
-                          ? 'No supported keywords found. Compare this job manually.'
-                          : result.method}
-                      </p>
-                      <p>
-                        Reordering does not increase keyword coverage. This is not an ATS score or a
-                        selection probability.
-                      </p>
-                    </div>
-                    <div className="card keyword-card">
-                      <h3>
-                        Already in your resume <span>{result.matched.length}</span>
-                      </h3>
-                      <div className="chips">
-                        {result.matched.map((k) => (
-                          <span key={k}>{k}</span>
-                        ))}
-                        {!result.matched.length && <p>No recognized overlap.</p>}
-                      </div>
-                      <h3>
-                        Not mentioned <span>{result.missing.length}</span>
-                      </h3>
-                      <div className="chips missing">
-                        {result.missing.map((k) => (
-                          <span key={k}>{k}</span>
-                        ))}
-                        {!result.missing.length && <p>No recognized keyword gaps.</p>}
-                      </div>
-                      <p>
-                        Add a missing skill only if you actually have it. Required and preferred
-                        skills are not distinguished by this metric.
-                      </p>
-                    </div>
-                  </div>
-                  <ResumeChanges result={result} edited={edited} />
-                  <Enhancements
-                    key={result.updatedResume}
-                    draft={edited}
-                    jd={jd}
-                    disabled={!!busy}
-                    onApply={(text) => {
-                      setEdited(text);
-                      setEditing(true);
-                      setPreview([]);
-                      setNotice(
-                        'Improvement applied. Review the editor and final PDF layout before sending.',
-                      );
-                    }}
-                  />
-                  <GapSuggestions
-                    suggestions={result.suggestions || []}
-                    disabled={!!busy}
-                    onAdd={(point, line) => {
-                      const lines = edited.split('\n');
-                      const index = Math.max(
-                        0,
-                        Math.min(lines.length, (Number.isFinite(line) ? line : 1) - 1),
-                      );
-                      lines.splice(
-                        index,
-                        0,
-                        '- ' +
-                          point
-                            .trim()
-                            .replace(/^[-•*]\s+/, '')
-                            .replace(/\n+/g, ' '),
-                      );
-                      const text = lines.join('\n');
-                      if (text.length > 60000) {
-                        setError('Resume must stay under 60,000 characters.');
-                        return;
-                      }
-                      setEdited(text);
-                      setEditing(true);
-                      setPreview([]);
-                      setNotice(
-                        'Point added. Review its placement in the editor before exporting.',
-                      );
-                    }}
-                  />
-                  <div className="card layout-card">
-                    <h3>{pdfResult ? 'Your tailored PDF · original design' : 'Rebuilt exports'}</h3>
-                    {pdfResult ? (
-                      <>
-                        <p>
-                          The PDF retains your original typography, margins, bullets and page count.
-                          Only safely detected bullet groups move within their section. This preview
-                          is the exported PDF, not the plain-text editor below.
-                        </p>
-                        <div className="layout-actions">
-                          <button
-                            disabled={!!busy || edited !== result.updatedResume}
-                            onClick={() => originalPDF('preview')}
-                          >
-                            Preview original layout
-                          </button>
-                          <button
-                            className="primary"
-                            disabled={!!busy}
-                            onClick={() => originalPDF('download')}
-                          >
-                            Pay ₹1 & download PDF ↓
-                          </button>
-                          {edited !== result.updatedResume && (
-                            <button
-                              onClick={() => {
-                                setEdited(result.updatedResume);
-                                setPreview([]);
-                              }}
-                            >
-                              Restore generated draft
-                            </button>
-                          )}
-                        </div>
-                        {edited !== result.updatedResume && (
-                          <p className="edit-note">
-                            Choose Done editing to generate your original resume design with your
-                            edited text.
-                          </p>
-                        )}
-                        {preview.length > 0 && edited === result.updatedResume && (
-                          <div
-                            className="pdf-preview"
-                            aria-label="Original-layout tailored PDF preview"
-                          >
-                            {preview.map((page, i) => (
-                              <figure key={i}>
-                                <figcaption>
-                                  Page {i + 1} of {preview.length} · original dimensions and page
-                                  count
-                                </figcaption>
-                                <div className="pdf-comparison">
-                                  {page.originalImage && (
-                                    <div>
-                                      <strong>Original resume</strong>
-                                      <img
-                                        alt={`Original resume page ${i + 1}`}
-                                        src={`data:image/png;base64,${page.originalImage}`}
-                                      />
-                                    </div>
-                                  )}
-                                  <div>
-                                    <strong>Tailored resume</strong>
-                                    <img
-                                      alt={`Tailored PDF page ${i + 1}`}
-                                      src={`data:image/png;base64,${page.image}`}
-                                    />
-                                  </div>
-                                </div>
-                              </figure>
-                            ))}
+              <div hidden={step !== 1}>
+                <form onSubmit={generate}>
+                  <div className="input-grid">
+                    {[
+                      {
+                        which: 'resume',
+                        title: 'Your resume',
+                        desc: 'Start with the experience you already have.',
+                        value: resume,
+                      },
+                      {
+                        which: 'jd',
+                        title: 'The job description',
+                        desc: 'Add the requirements for your next role.',
+                        value: jd,
+                      },
+                    ].map((item, i) => (
+                      <section className="card input-card" key={item.which}>
+                        <div className="card-heading">
+                          <span className="number">0{i + 1}</span>
+                          <div>
+                            <h2>{item.title}</h2>
+                            <p>{item.desc}</p>
                           </div>
-                        )}
-                      </>
-                    ) : (
-                      <p>
-                        {result.layoutMode
-                          ? 'This saved draft does not include the original PDF. Re-upload the original PDF and job description to generate an original-layout download.'
-                          : 'Upload your original PDF before tailoring to preserve its formatting. Pasted text and Word files use rebuilt exports.'}
-                      </p>
-                    )}
+                        </div>
+                        <label className="upload">
+                          <span className="upload-icon">↥</span>
+                          <strong>Choose a file</strong>
+                          <span>PDF, DOCX or TXT · up to 5 MB</span>
+                          <input
+                            aria-label={'Upload ' + item.title}
+                            disabled={!!busy}
+                            type="file"
+                            accept=".pdf,.docx,.txt"
+                            onChange={(e) => upload(e, item.which)}
+                          />
+                        </label>
+                        <div className="text-label">
+                          <label htmlFor={item.which}>
+                            {item.which === 'resume' && sourcePdf
+                              ? 'Extracted text · original PDF attached'
+                              : 'Or paste the text below'}
+                          </label>
+                          <span>{item.value.length.toLocaleString()} / 60,000</span>
+                        </div>
+                        <textarea
+                          id={item.which}
+                          required
+                          minLength={20}
+                          maxLength={60000}
+                          value={item.value}
+                          readOnly={item.which === 'resume' && !!sourcePdf}
+                          disabled={!!busy}
+                          onChange={(e) => setInput(item.which, e.target.value)}
+                          placeholder={
+                            item.which === 'resume'
+                              ? 'Your name, experience, projects, skills and education…'
+                              : 'Job title, responsibilities, required skills and qualifications…'
+                          }
+                        />
+                      </section>
+                    ))}
                   </div>
-                  <div className="card editor-card">
-                    <div className="editor-header">
-                      <div>
-                        <h3>Your tailored resume</h3>
-                        <p>
-                          {pdfResult
-                            ? 'Edit your text, then choose Done editing to prepare the final PDF'
-                            : 'Plain-text editor · original formatting requires the source PDF'}
-                        </p>
-                      </div>
-                      <div className="export-buttons">
-                        {(result.layoutMode && edited === result.updatedResume
-                          ? ['txt']
-                          : ['pdf', 'docx', 'txt']
-                        ).map((format) => (
-                          <button
-                            key={format}
-                            disabled={!!busy || !edited.trim()}
-                            onClick={() => download(format)}
-                          >
-                            {format === 'pdf'
-                              ? pdfResult
-                                ? 'Original design PDF'
-                                : 'Rebuilt PDF'
-                              : format.toUpperCase()}{' '}
-                            · ₹1 ↓
-                          </button>
-                        ))}
-                      </div>
+                  {sourcePdf && (
+                    <div className="layout-banner">
+                      <strong>Original PDF layout ready</strong>
+                      <span>
+                        {sourcePdf.name} · fonts, colors and spacing come from your file. Source
+                        text is locked to keep the original design attached. Upload another file to
+                        replace it.
+                      </span>
+                    </div>
+                  )}
+                  <div className="action-card">
+                    <div>
+                      <label className="app-label" htmlFor="label">
+                        Application name <span>(optional)</span>
+                      </label>
+                      <input
+                        id="label"
+                        className="label-input"
+                        value={label}
+                        maxLength={100}
+                        onChange={(e) => setLabel(e.target.value)}
+                        placeholder="e.g. Acme · Full Stack Developer"
+                      />
+                      <label className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={save}
+                          onChange={(e) => setSave(e.target.checked)}
+                        />{' '}
+                        Save this result
+                      </label>
                     </div>
                     <div className="actions">
                       <button
+                        type="button"
                         disabled={!!busy}
+                        className="secondary"
                         onClick={() => {
-                          if (editing) finishEditing();
-                          else {
-                            setFinalReady(false);
-                            setEditing(true);
-                          }
+                          setSourcePdf(null);
+                          setPdfResult(null);
+                          setPreview([]);
+                          setResume(sampleResume);
+                          setJd(sampleJD);
+                          setLabel('Example Company · Full Stack Developer');
+                          setResult(null);
+                          setPurchase(null);
+                          setReviewed(false);
                         }}
                       >
-                        {editing ? 'Done editing' : 'Edit resume'}
+                        Try sample data
                       </button>
                       <button
-                        disabled={!!busy || !edited.trim()}
+                        className="primary"
+                        disabled={!!busy || resume.trim().length < 20 || jd.trim().length < 20}
+                      >
+                        {busy || 'Tailor my resume'} <span>↗</span>
+                      </button>
+                    </div>
+                  </div>
+                  <p className="privacy-note">
+                    ◇ Prepared downloads and payment records are stored on this server. Resume
+                    content is not sent to Razorpay. Optional AI improvements send your draft and
+                    job description to your configured AI provider only when you click Generate AI
+                    improvements.
+                  </p>
+                </form>
+              </div>
+              {result && (
+                <>
+                  <section hidden={step !== 2} aria-label="Match score">
+                    <div className="analysis-grid">
+                      <div className="card metric">
+                        <span>Original resume match</span>
+                        <strong>
+                          {result.score === null ? 'N/A' : result.score + '%'}
+                          <small>
+                            {result.matched.length} of {result.keywords.length} recognized keywords
+                          </small>
+                        </strong>
+                        <progress
+                          aria-label="Job keyword match"
+                          max="100"
+                          value={result.score || 0}
+                        />
+                        {result.score !== null && (
+                          <p className="unmatched">
+                            {100 - result.score}% of recognized JD keywords are not mentioned.
+                          </p>
+                        )}
+                        <p>
+                          {result.score === null
+                            ? 'No supported keywords found. Compare this job manually.'
+                            : result.method}
+                        </p>
+                        <p>
+                          Reordering does not increase keyword coverage. This is not an ATS score or
+                          a selection probability.
+                        </p>
+                      </div>
+                      <div className="card keyword-card">
+                        <h3>
+                          Already in your resume <span>{result.matched.length}</span>
+                        </h3>
+                        <div className="chips">
+                          {result.matched.map((k) => (
+                            <span key={k}>{k}</span>
+                          ))}
+                          {!result.matched.length && <p>No recognized overlap.</p>}
+                        </div>
+                        <h3>
+                          Not mentioned <span>{result.missing.length}</span>
+                        </h3>
+                        <div className="chips missing">
+                          {result.missing.map((k) => (
+                            <span key={k}>{k}</span>
+                          ))}
+                          {!result.missing.length && <p>No recognized keyword gaps.</p>}
+                        </div>
+                        <p>
+                          Add a missing skill only if you actually have it. Required and preferred
+                          skills are not distinguished by this metric.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="step-actions">
+                      <button disabled={locked} onClick={() => go(1)}>
+                        ← Back
+                      </button>
+                      <div className="actions">
+                        <button disabled={locked} onClick={() => go(3)}>
+                          Continue with manual editing
+                        </button>
+                        <button
+                          className="primary"
+                          disabled={locked || jd.trim().length < 20}
+                          onClick={() => {
+                            go(3);
+                            setAiRequest((value) => value + 1);
+                          }}
+                        >
+                          Generate with AI →
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                  <section hidden={step !== 3} aria-label="Edit tailored resume">
+                    {!originalText && (
+                      <div className="card">
+                        <label htmlFor="saved-jd">Job description for this saved draft</label>
+                        <textarea
+                          id="saved-jd"
+                          value={jd}
+                          maxLength={60000}
+                          onChange={(e) => setJd(e.target.value)}
+                          placeholder="Paste the job description to use AI improvements."
+                        />
+                      </div>
+                    )}
+                    <Enhancements
+                      key={result.updatedResume}
+                      draft={edited}
+                      jd={jd}
+                      disabled={!!busy || jd.trim().length < 20}
+                      requestId={aiRequest}
+                      onBusyChange={setAiBusy}
+                      onApply={updateDraft}
+                    />
+                    <section className="card editor-card">
+                      <div className="editor-header">
+                        <div>
+                          <h3>Your tailored resume</h3>
+                          <p>Edit the text below. Every applied AI suggestion appears here.</p>
+                        </div>
+                        <button disabled={locked} onClick={() => updateDraft(result.updatedResume)}>
+                          Restore tailored draft
+                        </button>
+                      </div>
+                      <label className="sr-only" htmlFor="resume-editor">
+                        Tailored resume editor
+                      </label>
+                      <textarea
+                        id="resume-editor"
+                        aria-label="Tailored resume editor"
+                        disabled={locked}
+                        maxLength={60000}
+                        value={edited}
+                        onChange={(e) => updateDraft(e.target.value)}
+                      />
+                      <p className="privacy-note">
+                        {pdfResult
+                          ? 'Your original PDF design is attached. Review the PDF preview in the next step after editing.'
+                          : 'Pasted text and Word files use a clean rebuilt layout.'}
+                      </p>
+                      <button
+                        disabled={locked || !edited.trim() || jd.trim().length < 20}
                         onClick={() =>
                           perform('Saving edited draft', async () => {
                             await api('/api/drafts', {
@@ -909,83 +898,285 @@ function App() {
                               body: JSON.stringify({ text: edited, jd, label }),
                             });
                             await refresh();
-                            setNotice('Edited draft saved locally.');
+                            setNotice('Edited draft saved.');
                           })
                         }
                       >
                         Save edited draft
                       </button>
+                    </section>
+                    <details className="extra-help">
+                      <summary>Add missing experience yourself</summary>
+                      <GapSuggestions
+                        suggestions={result.suggestions || []}
+                        disabled={locked}
+                        onAdd={(point, line) => {
+                          const lines = edited.split('\n');
+                          lines.splice(
+                            Math.max(
+                              0,
+                              Math.min(lines.length, (Number.isFinite(line) ? line : 1) - 1),
+                            ),
+                            0,
+                            '- ' +
+                              point
+                                .trim()
+                                .replace(/^[-•*]\s+/, '')
+                                .replace(/\n+/g, ' '),
+                          );
+                          const text = lines.join('\n');
+                          if (text.length > 60000) {
+                            setError('Resume must stay under 60,000 characters.');
+                            return;
+                          }
+                          updateDraft(text);
+                        }}
+                      />
+                    </details>
+                    <div className="step-actions">
+                      <button disabled={locked} onClick={() => go(2)}>
+                        ← Back to match
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={locked || !edited.trim()}
+                        onClick={() => go(4)}
+                      >
+                        Compare resumes →
+                      </button>
                     </div>
-                    {editing && (
-                      <p>
-                        Line numbers start at 1. New text keeps the source PDF design when attached;
-                        review the downloaded document for page breaks and spacing.
-                      </p>
-                    )}
-                    <textarea
-                      aria-label="Tailored resume editor"
-                      readOnly={!editing}
-                      maxLength={60000}
-                      value={edited}
-                      onChange={(e) => setEdited(e.target.value)}
-                    />
-                    {edited !== result.updatedResume && (
-                      <p className="edit-note">
-                        Unsaved edits. Downloads include your edits; the analysis and saved history
-                        describe the original generated draft.
-                      </p>
-                    )}
-                    {finalReady && !editing && (
-                      <section id="final-resume" aria-labelledby="final-resume-title">
-                        <h3 id="final-resume-title">Your final resume is ready</h3>
-                        <p>
-                          Review your text above. Your PDF will be prepared before checkout and
-                          released after the ₹1 payment is confirmed.
+                  </section>
+                  <section hidden={step !== 4} aria-label="Compare resumes">
+                    {originalText ? (
+                      <>
+                        <p className="comparison-legend">
+                          <span>Removed or reworded lines</span>
+                          <span>New or reworded lines</span> · Reordered lines keep their original
+                          color.
                         </p>
+                        <DraftComparison original={originalText} draft={edited} />
+                      </>
+                    ) : (
+                      <div className="notice">
+                        The original resume is not available for this saved draft. Review the
+                        current draft below, or upload the original in Step 1 for a full comparison.
+                      </div>
+                    )}
+                    {!originalText && (
+                      <div className="card">
+                        <pre className="plain-resume">{edited}</pre>
+                      </div>
+                    )}
+                    <details className="extra-help">
+                      <summary>See which points were reordered during tailoring</summary>
+                      <ResumeChanges result={result} edited={edited} />
+                    </details>
+                    {pdfResult && (
+                      <section className="card layout-card">
+                        <h3>Check your original PDF design</h3>
+                        <p>Preview your current edited draft before paying.</p>
                         <button
-                          className="primary"
-                          disabled={!!busy}
-                          onClick={() => download('pdf')}
+                          disabled={locked}
+                          onClick={() =>
+                            perform('Preparing PDF comparison', async () => {
+                              setPreview((await fetchPreview(pdfResult, edited)).pages);
+                            })
+                          }
                         >
-                          Pay ₹1 & download final PDF ↓
+                          {preview.length ? 'Refresh PDF preview' : 'Preview final PDF'}
                         </button>
+                        {!!preview.length && (
+                          <div className="pdf-preview">
+                            {preview.map((page, i) => (
+                              <figure key={i}>
+                                <figcaption>
+                                  Page {i + 1} of {preview.length}
+                                </figcaption>
+                                <div className="pdf-comparison">
+                                  {page.originalImage && (
+                                    <div>
+                                      <strong>Original resume</strong>
+                                      <img
+                                        alt={`Original PDF page ${i + 1}`}
+                                        src={`data:image/png;base64,${page.originalImage}`}
+                                      />
+                                    </div>
+                                  )}
+                                  <div>
+                                    <strong>Final resume</strong>
+                                    <img
+                                      alt={`Final PDF page ${i + 1}`}
+                                      src={`data:image/png;base64,${page.image}`}
+                                    />
+                                  </div>
+                                </div>
+                              </figure>
+                            ))}
+                          </div>
+                        )}
                       </section>
                     )}
-                    <details>
-                      <summary>Evidence behind the keyword matches</summary>
-                      {result.evidence.map((e) => (
-                        <p key={e.term}>
-                          <strong>{e.term}:</strong> {e.excerpt}
+                    <label className="checkbox review-check">
+                      <input
+                        type="checkbox"
+                        disabled={locked}
+                        checked={reviewed}
+                        onChange={(e) => setReviewed(e.target.checked)}
+                      />
+                      I have reviewed the final draft and confirm that it accurately describes my
+                      experience.
+                    </label>
+                    <div className="step-actions">
+                      <button disabled={locked} onClick={() => go(3)}>
+                        ← Back to editing
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={locked || !reviewed || !edited.trim()}
+                        onClick={() => go(5)}
+                      >
+                        Continue to payment →
+                      </button>
+                    </div>
+                  </section>
+                  <section hidden={step !== 5} aria-label="Payment">
+                    <div className="card checkout-card">
+                      <div>
+                        <div className="eyebrow">YOUR FINAL RESUME</div>
+                        <h3>{label || 'Tailored resume'}</h3>
+                        <p>Select the format you want to purchase.</p>
+                        <div className="format-options">
+                          {['pdf', 'docx', 'txt'].map((value) => (
+                            <label className={format === value ? 'chosen' : ''} key={value}>
+                              <input
+                                type="radio"
+                                name="format"
+                                value={value}
+                                checked={format === value}
+                                disabled={
+                                  locked || (value === 'pdf' && !!result.layoutMode && !pdfResult)
+                                }
+                                onChange={() => {
+                                  setFormat(value);
+                                  setPurchase(null);
+                                }}
+                              />
+                              <strong>{value.toUpperCase()}</strong>
+                              <span>
+                                {value === 'pdf'
+                                  ? pdfResult
+                                    ? 'Your original design'
+                                    : 'Clean rebuilt layout'
+                                  : value === 'docx'
+                                    ? 'Editable Word document'
+                                    : 'Plain text'}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                        {result.layoutMode && !pdfResult && (
+                          <p>
+                            Re-upload the source PDF in Step 1 to unlock its original design. DOCX
+                            and TXT are available as rebuilt files.
+                          </p>
+                        )}
+                        <p>
+                          Each payment unlocks one exact file in your chosen format. Download it
+                          again in this browser session without another charge.
                         </p>
-                      ))}
-                    </details>
-                  </div>
-                </section>
+                      </div>
+                      <div className="payment-total">
+                        <span>One-time payment</span>
+                        <strong>₹1</strong>
+                        <span>Secure checkout with Razorpay</span>
+                      </div>
+                    </div>
+                    {payment?.testMode && (
+                      <div className="notice">Razorpay test mode: no real money is charged.</div>
+                    )}
+                    {payment?.configured &&
+                      !payment.testMode &&
+                      payment.checkoutAllowed !== false && (
+                        <div className="notice">
+                          Razorpay Live Mode: this checkout charges real money.
+                        </div>
+                      )}
+                    {payment?.blockedReason && (
+                      <div className="alert" role="status">
+                        {payment.blockedReason}
+                      </div>
+                    )}
+                    {payment && !payment.configured && (
+                      <div className="alert" role="status">
+                        Payments are not configured on this server yet. Your draft is safe; editing
+                        and previews remain available.
+                      </div>
+                    )}
+                    <div className="step-actions">
+                      <button disabled={locked} onClick={() => go(4)}>
+                        ← Back to comparison
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={
+                          locked ||
+                          !reviewed ||
+                          !payment?.configured ||
+                          payment?.checkoutAllowed === false ||
+                          (format === 'pdf' && !!result.layoutMode && !pdfResult)
+                        }
+                        onClick={purchase ? () => go(6) : pay}
+                      >
+                        {purchase ? 'Continue to download →' : 'Pay ₹1 securely →'}
+                      </button>
+                    </div>
+                  </section>
+                </>
               )}
-              <div className="principles">
-                <div>
-                  <span>01 / HONEST</span>
-                  <h3>Built on your real experience</h3>
-                  <p>No invented metrics, skills or qualifications.</p>
+              <section hidden={step !== 6} aria-label="Download resume">
+                {purchase && (
+                  <div className="card download-card">
+                    <span className="success-mark" aria-hidden="true">
+                      ✓
+                    </span>
+                    <div className="eyebrow">PAYMENT VERIFIED</div>
+                    <h3>
+                      {downloaded
+                        ? 'Ready for your next opportunity.'
+                        : 'Your final file is ready.'}
+                    </h3>
+                    <p>{purchase.filename}</p>
+                    <p>Payment confirmed · ₹{(purchase.amount / 100).toFixed(0)}</p>
+                    <button className="primary" disabled={locked} onClick={download}>
+                      {downloaded ? 'Download again' : 'Download resume'} ↓
+                    </button>
+                    <p className="privacy-note">
+                      This downloads the exact file prepared before payment. Further edits or
+                      another format require a separate purchase.
+                    </p>
+                  </div>
+                )}
+                <div className="step-actions">
+                  <button disabled={locked || !result} onClick={() => go(4)}>
+                    ← Back to comparison
+                  </button>
+                  <button disabled={locked} onClick={() => go(1)}>
+                    Tailor another resume
+                  </button>
                 </div>
-                <div>
-                  <span>02 / READABLE</span>
-                  <h3>Your design preserved</h3>
-                  <p>PDF uploads retain their fonts, headings, spacing and page count.</p>
+              </section>
+              {savedPurchase() && (
+                <div className="recovery-bar">
+                  <span>Already paid or interrupted checkout?</span>
+                  <button disabled={locked} onClick={recover}>
+                    Recover previous purchase
+                  </button>
                 </div>
-                <div>
-                  <span>03 / TRANSPARENT</span>
-                  <h3>A clear view of your match</h3>
-                  <p>See the keywords, evidence and every change.</p>
-                </div>
-              </div>
+              )}
             </>
           )}
           <footer>
-            ResumeFit{' '}
-            <span>
-              A stronger application starts with an honest story. Selection is never guaranteed.
-            </span>
+            ResumeFit <span>Your experience stays yours. Download one file for ₹1.</span>
           </footer>
         </div>
       </main>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHmac, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import express from 'express';
 import multer from 'multer';
@@ -34,6 +34,7 @@ async function setup(t, overrides = {}) {
     const payment = state.payments.get(url.split('/').at(-1));
     return Response.json(payment || {}, { status: payment ? 200 : 404 });
   };
+  overrides.initialize?.(db);
   const payments = createPayments({
     db,
     upload: multer({ storage: multer.memoryStorage() }),
@@ -64,6 +65,7 @@ async function setup(t, overrides = {}) {
       method,
       headers: {
         'Content-Type': 'application/json',
+        Origin: 'https://resume.example',
         ...(token ? { 'X-Download-Token': token } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -138,7 +140,12 @@ test('forged signatures and mismatched order, amount, currency, or payment ID ca
     { ...proof, razorpay_payment_id: '../invalid' },
   ])
     assert.equal((await f.request(`/${purchase.id}/verify`, bad, purchase.token)).status, 400);
-  for (const bad of [{ amount: 1 }, { currency: 'USD' }, { order_id: 'order_other' }]) {
+  for (const bad of [
+    { amount: 1 },
+    { amount: 1000 },
+    { currency: 'USD' },
+    { order_id: 'order_other' },
+  ]) {
     f.captured(purchase, bad);
     assert.equal((await f.request(`/${purchase.id}/verify`, proof, purchase.token)).status, 400);
   }
@@ -224,7 +231,7 @@ test('provider failure fails closed and cleans up unpayable prepared artifacts',
 });
 
 async function clientSetup(t, fixture, outcome = 'success') {
-  const names = ['window', 'document', 'sessionStorage', 'fetch', 'setTimeout'];
+  const names = ['window', 'document', 'sessionStorage', 'fetch', 'setTimeout', 'setInterval'];
   const originals = Object.fromEntries(
     names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
   );
@@ -236,8 +243,19 @@ async function clientSetup(t, fixture, outcome = 'success') {
   });
   const nativeFetch = globalThis.fetch;
   const timers = globalThis.setTimeout;
-  const ui = { downloads: 0, checkouts: 0, stored: new Map() };
-  globalThis.fetch = (url, options) => nativeFetch(new URL(url, fixture.base).href, options);
+  const ui = {
+    downloads: 0,
+    checkouts: 0,
+    closed: 0,
+    stored: new Map(),
+    origin: 'https://resume.example',
+    outcome,
+  };
+  globalThis.fetch = (url, options = {}) =>
+    nativeFetch(new URL(url, fixture.base).href, {
+      ...options,
+      headers: { Origin: ui.origin, ...options.headers },
+    });
   globalThis.sessionStorage = {
     getItem: (key) => ui.stored.get(key),
     setItem: (key, value) => ui.stored.set(key, value),
@@ -247,6 +265,8 @@ async function clientSetup(t, fixture, outcome = 'success') {
     timer.unref?.();
     return timer;
   };
+  const intervals = globalThis.setInterval;
+  globalThis.setInterval = (fn, delay) => intervals(fn, delay === 3000 ? 10 : delay);
   globalThis.document = {
     body: { appendChild() {} },
     createElement: () => ({ click: () => ui.downloads++, remove() {} }),
@@ -259,19 +279,40 @@ async function clientSetup(t, fixture, outcome = 'success') {
       on(name, callback) {
         this.failure = callback;
       }
-      close() {}
+      close() {
+        ui.closed++;
+        this.options.modal.ondismiss();
+      }
       open() {
         ui.checkouts++;
-        if (outcome === 'cancel') return this.options.modal.ondismiss();
-        if (outcome === 'failure') {
+        if (ui.outcome === 'cancel') return this.options.modal.ondismiss();
+        if (
+          ui.outcome === 'website-mismatch' ||
+          ui.outcome === 'provider-failure-without-callback'
+        ) {
+          fixture.captured(
+            { orderId: this.options.order_id },
+            {
+              status: 'failed',
+              captured: false,
+              error_reason: 'website_mismatch',
+              error_description: 'Business – Website Mismatch',
+            },
+          );
+          if (ui.outcome === 'website-mismatch')
+            this.failure({ error: { reason: 'website_mismatch' } });
+          return;
+        }
+        if (ui.outcome === 'failure') {
           this.failure({ error: { description: 'Payment failed' } });
           return this.options.modal.ondismiss();
         }
-        if (outcome === 'retry-success')
+        if (ui.outcome === 'retry-success')
           this.failure({ error: { description: 'First attempt failed' } });
         const purchase = { orderId: this.options.order_id };
         const payment = fixture.captured(purchase, { id: `pay_browser${ui.checkouts}` });
-        this.options.handler(fixture.proof(purchase, payment.id));
+        if (ui.outcome !== 'capture-without-callback')
+          this.options.handler(fixture.proof(purchase, payment.id));
       }
     },
   };
@@ -347,10 +388,178 @@ test('original and edited PDFs use the layout engine and stay gated', async (t) 
   }
 });
 
-test('a failed checkout attempt can succeed inside the same modal', async (t) => {
+test('a racing failure callback cannot hide a captured payment', async (t) => {
   const f = await setup(t);
   const { ui, client } = await clientSetup(t, f, 'retry-success');
   await client.paidDownload({ text: 'Retry resume', format: 'txt' }, null, () => {});
   assert.equal(ui.downloads, 1);
+  assert.equal(ui.checkouts, 1);
+});
+
+test('stepper payment confirms without downloading; download is a separate verified action', async (t) => {
+  const f = await setup(t);
+  const { ui, client } = await clientSetup(t, f);
+  const fields = { text: 'ALEX MORGAN\nReviewed final draft', format: 'txt', mode: 'rebuilt' };
+  const purchase = await client.payForResume(fields, null, () => {});
+  assert.equal(purchase.amount, 100);
+  assert.equal(ui.checkouts, 1);
+  assert.equal(ui.downloads, 0, 'Step 5 must not start a download');
+  await client.downloadPurchased(purchase, () => {});
+  await client.downloadPurchased(purchase, () => {});
+  assert.equal(ui.downloads, 2);
+  assert.equal(ui.checkouts, 1, 'Step 6 must never open checkout');
+  const recovered = await client.recoverPayment(() => {});
+  assert.equal(recovered.id, purchase.id);
+  assert.equal(ui.downloads, 2, 'Recovery must return the verified purchase before downloading');
+  await client.payForResume(fields, null, () => {});
+  assert.equal(ui.checkouts, 1, 'Returning to the same file must reuse its payment');
+  await client.payForResume({ ...fields, text: 'A revised final resume' }, null, () => {});
+  assert.equal(ui.checkouts, 2, 'A changed artifact needs its own purchase');
+});
+
+test('download step rejects unpaid purchases without opening checkout or releasing a file', async (t) => {
+  const f = await setup(t);
+  const { ui, client } = await clientSetup(t, f);
+  const purchase = await f.order();
+  await assert.rejects(client.downloadPurchased(purchase), /not confirmed/);
+  assert.equal(ui.checkouts, 0);
+  assert.equal(ui.downloads, 0);
+});
+
+test('legacy purchases retain their original price after the ₹1 price migration', async (t) => {
+  const f = await setup(t, {
+    initialize(db) {
+      db.exec(`CREATE TABLE purchases (
+      id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, created TEXT NOT NULL,
+      order_id TEXT UNIQUE, payment_id TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
+      filename TEXT NOT NULL, content_type TEXT NOT NULL, artifact BLOB NOT NULL
+    )`);
+      db.prepare(
+        'INSERT INTO purchases (id, token_hash, created, order_id, filename, content_type, artifact) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'legacy',
+        createHash('sha256').update('legacy-token').digest('hex'),
+        new Date().toISOString(),
+        'order_legacy',
+        'legacy.txt',
+        'text/plain',
+        Buffer.from('Legacy purchased resume'),
+      );
+    },
+  });
+  const legacy = { id: 'legacy', orderId: 'order_legacy', token: 'legacy-token' };
+  assert.equal(f.db.prepare('SELECT amount FROM purchases WHERE id = ?').get('legacy').amount, 100);
+  f.captured(legacy, { amount: 100 });
+  const response = await f.request('/legacy/verify', f.proof(legacy), legacy.token);
+  assert.deepEqual(await response.json(), { paid: true });
+  assert.equal((await f.request('/legacy/download', null, legacy.token)).status, 200);
+  const current = await f.order();
+  assert.equal(current.amount, 100);
+  assert.equal(
+    f.db.prepare('SELECT amount FROM purchases WHERE id = ?').get(current.id).amount,
+    100,
+  );
+});
+
+test('switching Razorpay keys creates a fresh checkout and cannot reopen a cached test order', async (t) => {
+  // Both provider configurations are simulated; no live Razorpay request is made.
+  const keys = { ...config };
+  const f = await setup(t, { config: keys });
+  const { ui, client } = await clientSetup(t, f, 'cancel');
+  const fields = { text: 'Mode switch resume', format: 'txt' };
+  await assert.rejects(client.payForResume(fields, null));
+  const old = client.savedPurchase();
+  assert.equal(old.keyId, 'rzp_test_example');
+  keys.keyId = 'rzp_live_simulated';
+  await assert.rejects(client.recoverPayment(), /previous Razorpay keys/);
+  assert.equal(ui.checkouts, 1, 'recovery must not reopen the stale test checkout');
+  ui.outcome = 'success';
+  const current = await client.payForResume(fields, null);
+  assert.equal(current.keyId, 'rzp_live_simulated');
+  assert.notEqual(current.id, old.id);
+  assert.equal(ui.checkouts, 2);
+  await client.payForResume(fields, null);
+  assert.equal(ui.checkouts, 2, 'repeat use of the live purchase must not charge again');
+});
+
+test('failed checkout closes and website mismatch never unlocks a download', async (t) => {
+  const f = await setup(t);
+  const { ui, client } = await clientSetup(t, f, 'website-mismatch');
+  await assert.rejects(
+    client.payForResume({ text: 'Website mismatch resume', format: 'txt' }, null),
+    /Website Mismatch/,
+  );
+  assert.equal(ui.closed, 1);
+  assert.equal(ui.downloads, 0);
+  const purchase = client.savedPurchase();
+  const status = await (await f.request(`/${purchase.id}/status`, null, purchase.token)).json();
+  assert.equal(status.paymentStatus, 'failed');
+  assert.equal(status.failureReason, 'website_mismatch');
+  assert.equal((await f.request(`/${purchase.id}/download`, null, purchase.token)).status, 402);
+});
+for (const [outcome, paid] of [
+  ['capture-without-callback', true],
+  ['provider-failure-without-callback', false],
+]) {
+  test(`polling closes checkout when ${outcome}`, async (t) => {
+    const f = await setup(t);
+    const { ui, client } = await clientSetup(t, f, outcome);
+    const attempt = client.payForResume({ text: 'Callback recovery resume', format: 'txt' }, null);
+    if (paid) await attempt;
+    else await assert.rejects(attempt, /Website Mismatch/);
+    assert.equal(ui.closed, 1);
+    assert.equal(ui.downloads, 0);
+    const p = client.savedPurchase();
+    const status = await (await f.request(`/${p.id}/status`, null, p.token)).json();
+    assert.equal(status.paid, paid);
+  });
+}
+test('new ₹1 checkouts do not reuse previous ₹10 orders; prior orders remain verifiable', async (t) => {
+  const f = await setup(t);
+  const fields = { text: 'Price change resume', format: 'txt' };
+  const old = await f.order(fields);
+  f.db.prepare('UPDATE purchases SET amount=1000 WHERE id=?').run(old.id);
+  old.amount = 1000;
+  const fingerprint =
+    createHash('sha256')
+      .update(JSON.stringify({ ...fields, fileHash: '' }))
+      .digest('hex') +
+    ':' +
+    config.keyId;
+  old.fingerprint = fingerprint;
+  const { ui, client } = await clientSetup(t, f);
+  ui.stored.set('resumefit-purchases', JSON.stringify({ [fingerprint]: old, last: fingerprint }));
+  const current = await client.payForResume(fields, null);
+  assert.equal(current.amount, 100);
+  assert.notEqual(current.id, old.id);
+  f.captured(old, { id: 'pay_old10', amount: 1000 });
+  assert.deepEqual(
+    await (await f.request(`/${old.id}/verify`, f.proof(old, 'pay_old10'), old.token)).json(),
+    { paid: true },
+  );
+});
+test('live checkout from localhost is blocked before creating an order', async (t) => {
+  const f = await setup(t, { config: { ...config, keyId: 'rzp_live_simulated' } });
+  const response = await fetch(f.base + '/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'http://127.0.0.1:5173' },
+    body: JSON.stringify({ text: 'Local live resume', format: 'txt' }),
+  });
+  assert.equal(response.status, 403);
+  assert.match((await response.json()).error, /approved public website/);
+  assert.equal(f.state.calls.length, 0);
+});
+
+test('localhost recovery checks existing payments but never reopens an unpaid live checkout', async (t) => {
+  const f = await setup(t, { config: { ...config, keyId: 'rzp_live_simulated' } });
+  const { ui, client } = await clientSetup(t, f, 'cancel');
+  await assert.rejects(client.payForResume({ text: 'Live recovery resume', format: 'txt' }, null));
+  const purchase = client.savedPurchase();
+  ui.origin = 'http://127.0.0.1:5173';
+  await assert.rejects(client.recoverPayment(), /approved public website/);
+  assert.equal(ui.checkouts, 1);
+  f.captured(purchase);
+  const recovered = await client.recoverPayment();
+  assert.equal(recovered.id, purchase.id);
   assert.equal(ui.checkouts, 1);
 });

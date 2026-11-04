@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { tailor } from './match.js';
-import { enhanceResume } from './enhance.js';
+import { enhanceResume, enhancementConfigured } from './enhance.js';
 import { browserWorkspaces, initializeHistory, dailyAIBudget } from './workspaces.js';
 import { pdfEngine, tailorPDF } from './pdf-layout.js';
 
@@ -49,6 +49,7 @@ const payments = createPayments({
   upload,
   buildExport,
   config: {
+    appOrigin: process.env.APP_ORIGIN,
     demoMode: process.env.FREE_HOSTING_DEMO === 'true',
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
@@ -147,7 +148,7 @@ app.post(
           'Resume and JD must each contain 20–60,000 characters; additional experience must stay under 10,000 characters.',
       });
     try {
-      if (!process.env.OPENAI_API_KEY?.trim())
+      if (!enhancementConfigured())
         return res.status(503).json({
           error: 'AI improvements are temporarily unavailable. Basic tailoring is still available.',
         });

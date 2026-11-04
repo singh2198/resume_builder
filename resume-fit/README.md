@@ -12,7 +12,7 @@ npm run setup:pdf
 npm run dev
 ```
 
-Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. Basic prioritization and previews need no API key or external AI account. Optional AI improvements require an OpenAI API key. Downloads require Razorpay configuration below; SQLite needs no separate installation. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
+Open http://127.0.0.1:5173. Click **Try sample data**, then **Tailor my resume** to exercise the entire flow. Basic prioritization and previews need no API key or external AI account. Optional AI improvements require a Gemini or OpenAI API key. Downloads require Razorpay configuration below; SQLite needs no separate installation. `npm run setup:pdf` creates a project-local Python environment and installs the pinned PDF engine. React and Express remain the frontend and backend; Express calls the PDF helper through stdin/stdout. Set `PDF_PYTHON` to an alternative Python executable if necessary.
 
 For the built app:
 
@@ -30,7 +30,7 @@ Every PDF, DOCX or TXT export costs **₹1 (100 paise)**. The server fixes the p
 1. Copy `.env.example` to `.env` in the project root.
 2. In Razorpay **Test Mode → Account & Settings → API Keys**, generate a Key ID and Key Secret. Put them in `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`. These are server-only; never use a `VITE_` prefix for secrets.
 3. Enable automatic capture in Razorpay payment capture settings. An authorized but uncaptured payment does not unlock a download.
-4. Restart `npm run dev`, generate a resume, then click **Pay ₹1 & download**. Test payments are simulated; the UI identifies Test Mode.
+4. Restart `npm run dev`, follow the stepper, and click **Pay ₹1 securely** in Step 5. Once payment is verified, click **Download resume** in Step 6. Test payments are simulated; the UI identifies Test Mode.
 5. For a publicly reachable HTTPS deployment, set `APP_ORIGIN` to the exact frontend origin (no trailing slash). Configure a Razorpay webhook at `https://your-domain/api/payments/webhook`, subscribe to `payment.captured` and `order.paid`, and use the same random secret as `RAZORPAY_WEBHOOK_SECRET`. Local development can recover status by polling without a webhook; Razorpay cannot reach localhost directly.
 6. After account activation and successful test payments, configure live keys, live auto-capture and a live webhook, then restart the server to collect real ₹1 payments.
 
@@ -68,13 +68,13 @@ Basic tailoring preserves every original point and ranks bullets within the same
 
 ### Enable AI improvements
 
-1. Add `OPENAI_API_KEY=your_key` to the server `.env`. Keep existing Razorpay settings. Never use a `VITE_` prefix or paste a key into the resume inputs.
-2. Optionally set `OPENAI_MODEL` to a Responses API model supporting Structured Outputs (default: `gpt-4.1-mini`). Restart the server.
-3. Tailor your resume as usual. Under **Improve points for this job**, describe additional real work with its role/project if you want new points, then click **Generate AI improvements**. This sends the current draft, JD and additional facts to OpenAI and may incur API charges.
+1. Set `AI_PROVIDER=gemini` and add `GEMINI_API_KEY=your_key` to the server `.env`. Keep existing Razorpay settings. Never use a `VITE_` prefix or paste a key into the resume inputs.
+2. Optionally set `GEMINI_MODEL` (default: `gemini-3.5-flash-lite`). Restart the server. For OpenAI instead, use `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and optionally `OPENAI_MODEL` (default: `gpt-4.1-mini`). If AI_PROVIDER is omitted, Gemini is selected when GEMINI_API_KEY is present; otherwise OpenAI is selected.
+3. Tailor your resume as usual. Under **Improve points for this job**, describe additional real work with its role/project if you want new points, then click **Generate AI improvements**. This sends the current draft, JD and additional facts to the configured AI provider and may incur API charges.
 4. Review each before/after suggestion, its source evidence and factual accuracy. Confirm and apply individual changes. Unsupported skills appear as questions or learning tasks, not inserted claims. Regeneration uses the current edited draft.
 5. Review the editor and exported PDF. Applied improvements use the existing edited-original PDF export for uploaded PDFs, including its section styling and overflow safeguards. The free original-layout preview still represents the unedited generated draft. Longer text may require shortening to fit.
 
-The server uses the [OpenAI Responses API with Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), disables response storage (`store: false`), validates source anchors and exact evidence quotes, and returns sanitized provider errors. Evidence checks do not prove semantic truth: you must review generated claims. No real key is included. Without a configured key, AI enhancement reports a setup message while basic tailoring remains available. No external AI calls occur during basic tailoring, PDF previews, exports or automated tests.
+The server supports the [Gemini Generate Content API](https://ai.google.dev/api/generate-content) with JSON schema output, or the [OpenAI Responses API with Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), disables OpenAI response storage (`store: false`), validates source anchors and exact evidence quotes, and returns sanitized provider errors. Evidence checks do not prove semantic truth: you must review generated claims. No real key is included. Without a configured key, AI enhancement reports a setup message while basic tailoring remains available. No external AI calls occur during basic tailoring, PDF previews, exports or automated tests.
 
 ### Matching limitations
 
@@ -102,7 +102,7 @@ The server uses the [OpenAI Responses API with Structured Outputs](https://devel
 
 The server binds to `127.0.0.1`. This is a **single-user local app**, without authentication. Do not expose it to a shared network or public hosting as-is. All local users with access to the app/database can read saved drafts.
 
-Raw uploads stay in memory. Preparing a paid download stores the generated file and its payment record in SQLite, including preparations that have not yet been paid. Other unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is sent to OpenAI only when you request AI improvements; this includes the current draft, job description and additional facts. AI suggestions remain in browser state until applied; applied edits can be saved or exported through the existing flow. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
+Raw uploads stay in memory. Preparing a paid download stores the generated file and its payment record in SQLite, including preparations that have not yet been paid. Other unsaved resume/JD text is processed transiently. If Save is checked, the generated resume and analysis (including source evidence) are written to `data/resume-fit.sqlite`; the raw JD and upload are not saved. Delete through Saved applications to remove a record. Database storage is not encrypted, and SQL DELETE is not a secure erase of disk backups. Personal data is sent to the configured AI provider only when you request AI improvements; this includes the current draft, job description and additional facts. AI suggestions remain in browser state until applied; applied edits can be saved or exported through the existing flow. The UI uses Google Fonts; font requests contact Google, but no resume text is sent. System fonts are the fallback offline.
 
 History stores the original generated draft. Manual editor changes are included in purchased exports and can be saved with **Save edited draft locally**; editing alone does not update the displayed score. Inputs changing dismiss the old result to avoid displaying stale analysis.
 
@@ -122,7 +122,7 @@ vite.config.js          Frontend build and development proxy
 
 ## API
 
-- `POST /api/enhance` — JSON `resume`, `jd`, optional `facts` (10,000 chars); returns reviewed improvement candidates and skill gaps; requires server OpenAI key, limited to 5 requests/minute per IP
+- `POST /api/enhance` — JSON `resume`, `jd`, optional `facts` (10,000 chars); returns reviewed improvement candidates and skill gaps; requires a server Gemini or OpenAI key, limited to 5 requests/minute per IP
 - `GET /api/health` — server readiness
 - `POST /api/extract` — multipart form with `file`; returns `{ text }`
 - `POST /api/tailor-pdf` — multipart `file`, `jd`, optional `label`, `save`; returns draft and original-layout metadata
@@ -160,3 +160,13 @@ PDF engine regression tests: `.venv/bin/python server/pdf/layout_test.py` (Windo
 See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker/Render setup, persistent SQLite storage, server environment variables, Razorpay webhooks and hosted verification. `render.yaml` is inside `resume-fit/` relative to the repository root. The public deployment uses signed browser workspaces to isolate saved history, and a persistent daily AI request cap. It needs `SESSION_SECRET` and a paid service with persistent disk. Public browser workspaces last up to 30 days; they are not user accounts or cross-device recovery. Local development keeps its existing personal history. Existing local history is not shared with public visitors.
 
 Local startup binds to `127.0.0.1` by default; hosting sets `HOST=0.0.0.0`. The earlier single-user local limitations above describe development mode. Production mode requires a stable session secret and scopes history reads, writes and deletion to the current signed browser workspace.
+
+
+## Guided resume workflow
+
+The workspace shows one step at a time: (1) upload/paste the resume and JD and tailor, (2) review original-resume keyword coverage, (3) generate evidence-grounded AI suggestions or edit manually, (4) compare the original with the current draft and confirm review, (5) choose PDF/DOCX/TXT and pay ₹1, (6) download the verified purchased file. Navigation preserves drafts; changing inputs or edits invalidates the current review/payment selection. Already-purchased files remain recoverable separately.
+
+Payment confirmation does not automatically download a file. The download step checks server-side paid status again. New orders are fixed at 100 paise (INR), ignoring client prices. Existing purchases retain their original stored price and free repeat-download access. Source PDF preview and export retain the original-layout engine. Keyword coverage is a baseline metric, not an ATS score or hiring probability.
+
+
+Live checkout must run on a public website approved under your Razorpay account's Website and app settings. Live orders from localhost are rejected before checkout to prevent website-mismatch failures. A failed or cancelled checkout closes and rechecks the provider status; only captured payments unlock downloads. The app also polls while checkout is open to recover a captured UPI payment if the browser callback is lost. Failed attempts remain locked and can be checked with Recover previous purchase. Changing the price creates a fresh checkout for the new amount without altering existing orders or files.

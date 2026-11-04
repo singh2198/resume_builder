@@ -15,6 +15,14 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     order_id TEXT UNIQUE, payment_id TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
     filename TEXT NOT NULL, content_type TEXT NOT NULL, artifact BLOB NOT NULL
   )`);
+  // Preserve the price of already-created purchases; new orders use the current price.
+  if (
+    !db
+      .prepare('PRAGMA table_info(purchases)')
+      .all()
+      .some((column) => column.name === 'amount')
+  )
+    db.exec('ALTER TABLE purchases ADD COLUMN amount INTEGER NOT NULL DEFAULT 100');
   const router = express.Router();
   const ready = () => {
     if (config.demoMode && !config.keyId?.startsWith('rzp_test_'))
@@ -55,8 +63,12 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     return row;
   }
   function confirm(row, payment) {
-    if (payment.order_id !== row.order_id || payment.amount !== PRICE || payment.currency !== 'INR')
-      throw httpError(400, 'Payment does not match this ₹1 download.');
+    if (
+      payment.order_id !== row.order_id ||
+      payment.amount !== row.amount ||
+      payment.currency !== 'INR'
+    )
+      throw httpError(400, 'Payment does not match the amount of this purchased file.');
     if (payment.status !== 'captured' || payment.captured !== true) return false;
     db.prepare(
       "UPDATE purchases SET status = 'paid', payment_id = ? WHERE id = ? AND status = 'pending'",
@@ -64,12 +76,45 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     return true;
   }
   async function reconcile(row) {
-    if (row.status === 'paid') return true;
+    if (row.status === 'paid') return { paid: true };
     const payments = await razorpay(`/orders/${encodeURIComponent(row.order_id)}/payments`);
-    for (const payment of payments.items || []) {
-      if (payment.status === 'captured' && confirm(row, payment)) return true;
+    const items = payments.items || [];
+    for (const payment of items) {
+      if (payment.status === 'captured' && confirm(row, payment)) return { paid: true };
     }
-    return false;
+    if (items.some((payment) => payment.status === 'authorized'))
+      return { paid: false, paymentStatus: 'authorized' };
+    if (items.some((payment) => payment.status === 'created')) return { paid: false };
+    const failed = items
+      .filter((payment) => payment.status === 'failed')
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+    if (failed) {
+      const details = `${failed.error_reason || ''} ${failed.error_description || ''}`;
+      return {
+        paid: false,
+        paymentStatus: 'failed',
+        failureReason: /website|domain/i.test(details) ? 'website_mismatch' : 'payment_failed',
+      };
+    }
+    return { paid: false };
+  }
+  function checkoutBlockedReason(req) {
+    if (!config.keyId?.startsWith('rzp_live_')) return null;
+    const origin = req.get('Origin') || config.appOrigin || `${req.protocol}://${req.get('Host')}`;
+    let hostname;
+    try {
+      hostname = new URL(origin).hostname;
+    } catch {
+      return 'Configure your public website origin before accepting live payments.';
+    }
+    if (
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      /^127\./.test(hostname) ||
+      ['[::1]', '::1', '0.0.0.0'].includes(hostname)
+    )
+      return 'Live payments are blocked on localhost. Open the app on your Razorpay-approved public website to avoid Business – Website Mismatch. Use Test Mode for local development.';
+    return null;
   }
   const route = (fn) => async (req, res, next) => {
     try {
@@ -82,14 +127,18 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     res.set('Cache-Control', 'no-store');
     next();
   });
-  router.get('/config', (_, res) =>
+  router.get('/config', (req, res) =>
     res.json({
       configured: !!(
         config.keyId &&
         config.keySecret &&
         (!config.demoMode || config.keyId.startsWith('rzp_test_'))
       ),
+      // Checkout key IDs are public; the secret remains server-only.
+      keyId: config.keyId || null,
       demoMode: !!config.demoMode,
+      checkoutAllowed: !checkoutBlockedReason(req),
+      blockedReason: checkoutBlockedReason(req),
       amount: PRICE,
       currency: 'INR',
       testMode: config.keyId?.startsWith('rzp_test_') || false,
@@ -100,6 +149,8 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     upload.single('file'),
     route(async (req, res) => {
       ready();
+      const blocked = checkoutBlockedReason(req);
+      if (blocked) throw httpError(403, blocked);
       let artifact;
       try {
         artifact = await buildExport(req);
@@ -110,7 +161,7 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
         token = randomBytes(32).toString('hex');
       // Persist the file first, so payment is never requested for an unavailable export.
       db.prepare(
-        'INSERT INTO purchases (id, token_hash, created, filename, content_type, artifact) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO purchases (id, token_hash, created, filename, content_type, artifact, amount) VALUES (?, ?, ?, ?, ?, ?, ?)',
       ).run(
         id,
         digest(token),
@@ -118,6 +169,7 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
         artifact.filename,
         artifact.type,
         artifact.bytes,
+        PRICE,
       );
       let order;
       try {
@@ -151,7 +203,7 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
   router.get(
     '/:id/status',
     route(async (req, res) => {
-      res.json({ paid: await reconcile(purchase(req)) });
+      res.json(await reconcile(purchase(req)));
     }),
   );
   router.post(
@@ -184,8 +236,7 @@ export function createPayments({ db, upload, buildExport, config, fetchImpl = fe
     '/:id/download',
     route(async (req, res) => {
       const row = purchase(req);
-      if (row.status !== 'paid')
-        throw httpError(402, 'Complete the ₹1 payment before downloading.');
+      if (row.status !== 'paid') throw httpError(402, 'Complete payment before downloading.');
       res.attachment(row.filename).type(row.content_type).send(Buffer.from(row.artifact));
     }),
   );

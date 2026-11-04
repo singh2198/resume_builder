@@ -1,0 +1,43 @@
+# Production deployment: paid compute and durable storage. No credentials belong in this file.
+# Blueprint path in the repository: resume-fit/render.production.yaml
+services:
+  - type: web
+    name: resume-fit
+    runtime: docker
+    plan: starter
+    numInstances: 1
+    rootDir: resume-fit
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    disk:
+      name: resume-fit-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /app/data
+      - key: TRUST_PROXY_HOPS
+        value: '1'
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: FREE_HOSTING_DEMO
+        value: 'false'
+      - key: MAX_AI_REQUESTS_PER_DAY
+        value: '100'
+      - key: AI_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
