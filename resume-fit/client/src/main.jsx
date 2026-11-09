@@ -531,9 +531,16 @@ function App() {
           <div className="title-row">
             <div>
               <h1>
-                {view === 'workspace'
-                  ? 'A better resume, step by step.'
-                  : 'Your saved applications.'}
+                {view === 'workspace' ? (
+                  <>
+                    A better resume,{' '}
+                    <span className="accent">step by step.</span>
+                  </>
+                ) : (
+                  <>
+                    Your saved <span className="accent">applications.</span>
+                  </>
+                )}
               </h1>
               <p className="subtitle">
                 {view === 'workspace'
