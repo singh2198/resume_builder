@@ -1,8 +1,8 @@
 # Build the React app without copying local secrets or databases.
 FROM node:22-bookworm-slim AS frontend
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json ./
+RUN npm install
 COPY client ./client
 COPY vite.config.js ./
 RUN npm run build
@@ -15,8 +15,8 @@ RUN apt-get update \
 COPY server/pdf/requirements.txt ./server/pdf/requirements.txt
 RUN python3 -m venv /opt/pdf-venv \
     && /opt/pdf-venv/bin/pip install --no-cache-dir -r server/pdf/requirements.txt
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY package.json ./
+RUN npm install --omit=dev && npm cache clean --force
 COPY server ./server
 COPY --from=frontend /app/dist ./dist
 RUN mkdir -p /app/data
